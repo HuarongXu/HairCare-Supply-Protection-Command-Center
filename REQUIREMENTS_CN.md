@@ -1,0 +1,173 @@
+# MR Upload Tool - 需求与部署说明（中文）
+
+## 1）项目目的
+本项目提供：
+- MatRes / HC IDP 数据处理流水线（Pipeline）
+- 交互式 Dash 看板（Demand Assumption / Supply Protection / Project Details）
+
+## 2）运行环境要求
+- 操作系统：Windows 10/11 或 Windows Server（推荐 VM 部署）
+- Python：3.11+（当前已验证 3.13）
+- 网络：如需分享链接，需内网可访问
+- 浏览器：推荐 Edge / Chrome
+
+## 3）Python 依赖
+使用 `requirements.txt` 安装：
+
+```powershell
+pip install -r requirements.txt
+```
+
+主要依赖：
+- dash
+- pandas
+- plotly
+- openpyxl
+- waitress（用于 VM 稳定托管）
+
+## 4）项目关键路径
+- Dashboard：`dashboards/matres_app.py`
+- Pipeline：`scripts/matres_pipeline.py`
+- 配置：`config/config.json`
+- 处理结果：`data/processed/`
+
+## 5）本地开发运行
+### 5.1 运行 Pipeline
+```powershell
+& ".\.venv\Scripts\python.exe" scripts\matres_pipeline.py
+```
+
+### 5.2 运行 Dashboard（调试模式）
+```powershell
+& ".\.venv\Scripts\python.exe" dashboards\matres_app.py
+```
+
+## 6）VM 部署（推荐共享方式）
+> 目标：通过邮件发 URL，保留完整交互功能。
+
+### 6.1 复制项目到 VM
+复制完整项目目录（至少包含 `config/`, `dashboards/`, `scripts/`, `data/`）。
+
+### 6.2 在 VM 创建并激活虚拟环境
+```powershell
+python -m venv .venv
+& ".\.venv\Scripts\Activate.ps1"
+pip install -r requirements.txt
+```
+
+### 6.3 在 VM 运行 Pipeline
+```powershell
+& ".\.venv\Scripts\python.exe" scripts\matres_pipeline.py
+```
+
+### 6.4 启动 Dashboard（监听所有网卡）
+```powershell
+& ".\.venv\Scripts\python.exe" -c "from dashboards.matres_app import app; app.run(host='0.0.0.0', port=8050, debug=False)"
+```
+
+### 6.5 开放防火墙端口（一次）
+（管理员权限）
+```powershell
+netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol=TCP localport=8050
+```
+
+### 6.6 访问地址
+- VM 本机：`http://127.0.0.1:8050`
+- 局域网：`http://<VM_IP>:8050`
+
+## 7）生产稳定启动（Waitress）
+```powershell
+& ".\.venv\Scripts\waitress-serve.exe" --listen=0.0.0.0:8050 dashboards.matres_app:app.server
+```
+
+## 8）常见问题排查
+### 8.1 `127.0.0.1 refused to connect`
+- 应用进程未启动或已退出
+- Python/venv 路径错误
+- 端口未监听（`netstat -ano | findstr :8050`）
+
+### 8.2 `python.exe not recognized`
+- VM 上项目未复制完整或路径不一致
+- 在项目根目录使用相对命令：
+```powershell
+& ".\.venv\Scripts\python.exe" ...
+```
+
+### 8.3 VM IP 可访问但 127.0.0.1 不可访问
+- 浏览器代理设置影响 localhost
+- 尝试 `http://localhost:8050` 并在代理中放行 localhost/127.0.0.1
+
+## 9）建议运维方式
+- 用 Windows 任务计划定时跑 `scripts/matres_pipeline.py`
+- Dashboard 在 VM 常驻（任务计划或 NSSM）
+- 邮件仅发 URL，不发送“离线 HTML 完整交互”预期
+
+## 10）业务逻辑与计算口径
+
+### 10.1 数据源
+- MatRes 主数据：来自 `config/config.json` 指定工作簿
+- HC IDP 报表：项目根目录最新 `HC IDP HANA TD Report*.xls*`
+  - `Monthly`：用于月份数据
+  - `Weekly(TP)`：用于当前月覆盖（ER -> LBE）
+- 历史基线：`Historical Shipment Data_FY2425.xlsx`（`Sheet1`）
+
+### 10.2 Pipeline 产出文件（`data/processed`）
+- `monthly_msu_by_item_text.csv`
+- `monthly_msu_by_requester_item.csv`
+- `monthly_msu_by_level1.csv`
+- `pde_alerts.csv`
+- `matres_request_details.csv`
+- `level1_unmapped_materials.csv`
+- `hc_idp_monthly_summary.csv`
+
+### 10.3 角色映射规则
+- 映射文件：`config/requester_roles.json`
+- Email 预处理包含常见 typo 修复（如 `@pg,com -> @pg.com`）
+- 未匹配角色归为 `Others`
+
+### 10.4 Supply Protection（Level1）映射规则
+- 来自 Level1 映射工作簿（配置项控制）
+- 若映射缺失：
+  - `Item Text = RM Material`：强制归到 `Base`
+  - 其他类型：保留 `未映射`
+- UI 中 `未映射` 若显示值近似为 0，会自动隐藏
+
+### 10.5 Demand LBE 逻辑
+- UI 维度显示名：`Prod Line`（Base / Promotion / Total）
+- 时间窗口：当前季度 + 下个季度（共 6 个月）
+- 当前月取数：`Weekly(TP)` 的 ER->LBE，且 SU 转 MSU（/1000）
+- 非当前月取数：`Monthly`（同样标准化为 MSU）
+
+### 10.6 Demand HS 逻辑
+- `Demand HS = Demand LBE + Supply Protection`（按月）
+- Supply 对应关系：
+  - `Base` 加到 HS Base
+  - `PP` / `Promotion` 加到 HS Promotion
+- HS Total = Base + Promotion
+
+### 10.7 IYA（月度）逻辑
+- `Demand LBE IYA` 与 `Demand HS IYA`：
+  - `IYA% = 当月值 / 去年同月值 * 100`
+- 去年同月基线来自 `Historical Shipment Data_FY2425.xlsx`（`Sheet1`）
+- 分母缺失或为 0 时显示 `-`
+
+### 10.8 Demand IYA by quarter（季度）逻辑
+- 季度标签按当前季度月份缩写（如 `JFM`）
+- 行：`Base / Promotion / Total`
+- 列：
+  - `JFM LBE`：第一季度 LBE 合计
+  - `JFM HS`：第一季度 HS 合计
+  - `JFM LBE IYA`：第一季度 LBE / 去年同期 * 100
+  - `JFM HS IYA`：第一季度 HS / 去年同期 * 100
+
+### 10.9 Demand Assumption 页面布局
+- 双列三行：
+  - 第1行：`Demand LBE` | `Demand LBE IYA`
+  - 第2行：`Demand HS` | `Demand HS IYA`
+  - 第3行：`Supply Protection` | `Demand IYA by quarter`
+- 标题不使用 `Table x:` 前缀
+
+### 10.10 显示格式
+- 月份统一：`YYYY-MM`
+- Demand 数值表（LBE / HS）显示整数
+- IYA 表显示百分比

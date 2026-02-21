@@ -1,0 +1,14 @@
+[
+  {"email": "xu.x.17@pg.com", "role": "IOL"},
+  {"email": "liu.b.2@pg.com", "role": "IOL"},
+  {"email": "chen.g.9@pg.com", "role": "IOL"},
+  {"email": "xie.xy@pg.com", "role": "IOL"},
+  {"email": "zeng.re@pg.com", "role": "IOL"},
+  {"email": "guan.bi@pg.com", "role": "CROSS REGION"},
+  {"email": "zhang.h.26@pg.com", "role": "CSP"},
+  {"email": "zhong.d@pg.com", "role": "CSP"},
+  {"email": "liu.jp.1@pg.com", "role": "CSP"},
+  {"email": "sun.y.25@pg.com", "role": "CSP"},
+  {"email": "huang.h.9@pg.com", "role": "CSP"},
+  {"email": "fu.s.4@pg.com", "role": "SIP"}
+]
