@@ -180,3 +180,34 @@ Install already included in requirements.
 - Demand numeric tables (`Demand LBE`, `Demand HS`) display integers (no decimals).
 - IYA tables display percentages.
 
+## 11) Dashboard Pages (Current)
+- `Demand Assumption`
+	- Demand LBE / Demand LBE IYA / Demand HS / Demand HS IYA.
+	- Supply Protection split tables: `(PP + Base)` and `(HKTW + ESS)`.
+	- Quarter IYA split into two cards (current quarter and next quarter).
+- `Supply Protection`
+	- KPI cards: total protection MSU / item count / PDE alerts (coming 7 days).
+	- Role trend chart and role-item matrix.
+	- Monthly summary and Past Due Alerts table.
+- `Project Details`
+	- Role × Item × Project summary with role selector.
+	- Searchable multi-select filters: `Requester Email` and `MRP Element Indicator`.
+	- Drill-down detail table and full-detail export.
+- `Demand Data`
+	- TD version monthly comparison.
+	- Click GAP row to drill into `Level2 GAP Details` and `GAP Difference Details`.
+	- Supports export for both detail tables.
+- `Production Data`
+	- `By Plant` and `By Plant / Level1 / Level2` tables.
+	- Current month split into `MTD`, `Left Production`, `Current Month`.
+	- Total rows are highlighted (including `GC Total`).
+
+## 12) Board Logic HTML Guide
+- A handover-ready HTML documentation is provided at:
+	- `docs/board_logic_guide.html`
+- Open directly in browser for a full page-by-page explanation of:
+	- business purpose,
+	- data source files,
+	- key calculations and aggregation rules,
+	- refresh and operation notes.
+

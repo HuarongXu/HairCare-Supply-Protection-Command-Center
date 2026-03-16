@@ -171,3 +171,33 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 - 月份统一：`YYYY-MM`
 - Demand 数值表（LBE / HS）显示整数
 - IYA 表显示百分比
+
+## 11）页面功能总览（最新）
+- `Demand Assumption`
+  - 包含 `Demand LBE`、`Demand LBE IYA`、`Demand HS`、`Demand HS IYA`。
+  - Supply Protection 拆分为 `(PP + Base)` 与 `(HKTW + ESS)` 两块。
+  - 季度 IYA 拆分为当前季度与下季度两张表。
+- `Supply Protection`
+  - KPI 卡片：总保护量 MSU、Item Text 数量、未来 7 天 PDE 预警。
+  - Role 趋势图、Role-Item 汇总矩阵、Monthly Summary、Past Due Alerts。
+- `Project Details`
+  - `Role × Item × Project` 汇总。
+  - 支持可搜索多选筛选：`Requester Email` 与 `MRP Element Indicator`。
+  - 支持明细下钻与明细导出。
+- `Demand Data`
+  - `TD Version Monthly Comparison` 主表。
+  - 点击 GAP 行后可查看 `Level2 GAP Details` 与 `GAP Difference Details`。
+  - 两类明细都支持导出。
+- `Production Data`
+  - `By Plant` 与 `By Plant / Level1 / Level2` 两张表。
+  - 当月拆分为 `MTD`、`Left Production`、`Current Month`。
+  - Total 行（含 `GC Total`）高亮显示。
+
+## 12）板子逻辑 HTML 说明文档
+- 已提供可交接的 HTML 文档：
+  - `docs/board_logic_guide.html`
+- 可直接浏览器打开，包含：
+  - 页面功能说明，
+  - 数据来源文件，
+  - 主要计算逻辑与口径，
+  - 刷新与运维建议。

@@ -2,16 +2,19 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import logging
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import dash
 from dash import Dash, Input, Output, State, dcc, html
 from dash.dash_table import DataTable
+from dash.exceptions import PreventUpdate
+from flask import abort, request
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -21,6 +24,7 @@ CONFIG_PATH = Path(os.getenv("MATRES_CONFIG", "config/config.json"))
 @dataclass
 class AppConfig:
     processed_dir: Path
+    data_base_dir: Path
 
     @staticmethod
     def load(path: Path) -> "AppConfig":
@@ -28,7 +32,12 @@ class AppConfig:
         processed_dir = Path(raw["processed_dir"])
         if not processed_dir.is_absolute():
             processed_dir = path.parent.parent / processed_dir
-        return AppConfig(processed_dir=processed_dir)
+
+        data_base_dir = Path(raw.get("data_base_dir", path.parent.parent))
+        if not data_base_dir.is_absolute():
+            data_base_dir = path.parent.parent / data_base_dir
+
+        return AppConfig(processed_dir=processed_dir, data_base_dir=data_base_dir)
 
 
 def load_dataset(processed_dir: Path, filename: str) -> pd.DataFrame:
@@ -39,15 +48,38 @@ def load_dataset(processed_dir: Path, filename: str) -> pd.DataFrame:
 
 
 def load_historical_shipment_dataset(cfg: AppConfig) -> pd.DataFrame:
-    root = cfg.processed_dir.parent.parent
-    candidates = [
-        p for p in root.glob("Historical Shipment Data_FY2425*.xls*")
-        if not p.name.startswith("~$")
+    search_roots: List[Path] = []
+    for root in [cfg.data_base_dir, cfg.processed_dir.parent.parent]:
+        resolved = Path(root)
+        if resolved not in search_roots:
+            search_roots.append(resolved)
+
+    candidates: List[Path] = []
+    patterns = [
+        "Historical Shipment Data_FY2425*.xls*",
+        "Historical Shipment Data*.xls*",
     ]
-    if not candidates:
+    for root in search_roots:
+        for pattern in patterns:
+            candidates.extend(
+                p for p in root.glob(pattern)
+                if not p.name.startswith("~$")
+            )
+
+    # de-duplicate same file collected via multiple patterns/roots
+    unique_candidates: List[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique_candidates.append(candidate)
+
+    if not unique_candidates:
         return pd.DataFrame()
 
-    file_path = max(candidates, key=lambda p: p.stat().st_mtime)
+    file_path = max(unique_candidates, key=lambda p: p.stat().st_mtime)
     try:
         raw = pd.read_excel(file_path, sheet_name="Sheet1", header=None)
     except Exception:
@@ -70,7 +102,7 @@ def load_historical_shipment_dataset(cfg: AppConfig) -> pd.DataFrame:
         label = str(raw.iloc[row_idx, 0]).strip().lower()
         if "base" in label:
             bucket = "Base"
-        elif "promotion" in label:
+        elif "promotion" in label or "pp" in label:
             bucket = "Promotion"
         elif "total" in label:
             bucket = "Total"
@@ -100,6 +132,10 @@ def load_data_bundle(cfg: AppConfig) -> Dict[str, Any]:
     monthly_requester = load_dataset(cfg.processed_dir, "monthly_msu_by_requester_item.csv")
     monthly_level1 = load_dataset(cfg.processed_dir, "monthly_msu_by_level1.csv")
     hc_idp_monthly = load_dataset(cfg.processed_dir, "hc_idp_monthly_summary.csv")
+    production_data = load_dataset(cfg.processed_dir, "production_data_summary.csv")
+    production_data_by_level = load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv")
+    td_validation = load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv")
+    td_validation_detail = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
     historical_shipment = load_historical_shipment_dataset(cfg)
     pde_alerts = load_dataset(cfg.processed_dir, "pde_alerts.csv")
     request_details_path = cfg.processed_dir / "matres_request_details.csv"
@@ -110,6 +146,10 @@ def load_data_bundle(cfg: AppConfig) -> Dict[str, Any]:
         "monthly_requester": monthly_requester.to_dict("records"),
         "monthly_level1": monthly_level1.to_dict("records"),
         "hc_idp_monthly": hc_idp_monthly.to_dict("records"),
+        "production_data": production_data.to_dict("records"),
+        "production_data_by_level": production_data_by_level.to_dict("records"),
+        "td_validation": td_validation.to_dict("records"),
+        "td_validation_detail": td_validation_detail.to_dict("records"),
         "historical_shipment": historical_shipment.to_dict("records"),
         "pde_alerts": pde_alerts.to_dict("records"),
         "request_details_version": details_version,
@@ -139,25 +179,34 @@ def load_request_details(cfg: AppConfig) -> pd.DataFrame:
 
 
 UNKNOWN_ROLE = "Others"
+GLOBAL_FONT_FAMILY = "Century Gothic, Segoe UI, sans-serif"
+ROLE_DISPLAY_MAP = {
+    "CSP": "On Going",
+    "IOL": "NI",
+}
 
 PDE_STYLE_HEADER = {
     "backgroundColor": "#eef4fb",
     "color": "#1f3b6d",
     "border": "1px solid #d6e2f0",
     "fontWeight": "600",
+    "fontFamily": GLOBAL_FONT_FAMILY,
+    "fontSize": "16px",
 }
 PDE_STYLE_CELL = {
     "backgroundColor": "#ffffff",
     "color": "#1f2937",
     "border": "1px solid #e2e8f0",
     "textAlign": "center",
+    "fontFamily": GLOBAL_FONT_FAMILY,
+    "fontSize": "15px",
 }
 PDE_STYLE_DATA_CONDITIONAL = [
     {"if": {"row_index": "odd"}, "backgroundColor": "#f8fbff"},
     {"if": {"state": "active"}, "backgroundColor": "#e8f1ff", "border": "1px solid #93c5fd"},
     {"if": {"state": "selected"}, "backgroundColor": "#dbeafe", "border": "1px solid #60a5fa"},
 ]
-TOTAL_LABEL = "汇总"
+TOTAL_LABEL = "Total"
 ROLE_ALL_VALUE = "ALL"
 DETAIL_VIEW_FIELDS = [
     "Material Number",
@@ -249,9 +298,32 @@ def build_monthly_matrix(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[
 
     working = df.copy()
     working["requester_role"] = working["requester_role"].fillna(UNKNOWN_ROLE)
-    working["item_label"] = working["Item Text"].astype(str).str.strip()
+    working["item_label"] = working["Item Text"].fillna("").astype(str).str.strip()
+    working.loc[
+        working["item_label"].str.lower().isin(["", "nan", "none"]),
+        "item_label",
+    ] = "Other"
+    working["total_msu"] = pd.to_numeric(working.get("total_msu", 0), errors="coerce").fillna(0.0)
 
-    months = sort_month_labels(working["availability_month"].dropna().tolist())
+    working["availability_month_norm"] = working["availability_month"].astype(str).str.strip()
+    working.loc[
+        working["availability_month_norm"].str.lower().isin(["", "nan", "none", "nat", "unknown", "unknow"]),
+        "availability_month_norm",
+    ] = pd.NA
+
+    months = sort_month_labels(working["availability_month_norm"].dropna().tolist())
+    if months:
+        month_totals = (
+            working.dropna(subset=["availability_month_norm"])
+            .groupby("availability_month_norm", dropna=False)["total_msu"]
+            .sum(min_count=1)
+        )
+        filtered_months: List[str] = []
+        for month in months:
+            month_total = pd.to_numeric(month_totals.get(month, 0), errors="coerce")
+            if pd.notna(month_total) and float(month_total) > 0:
+                filtered_months.append(month)
+        months = filtered_months
     if not months:
         columns.append({"name": TOTAL_LABEL, "id": TOTAL_LABEL})
         return columns, []
@@ -261,15 +333,23 @@ def build_monthly_matrix(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[
     columns.append({"name": TOTAL_LABEL, "id": TOTAL_LABEL})
 
     preferred_items = ["R Material", "RM Material", "R Quotation", "FG Rolling"]
-    unique_items = [item for item in preferred_items if item in working["item_label"].unique()]
-    remaining_items = [
-        item
-        for item in sorted(working["item_label"].unique())
-        if item not in unique_items
-    ]
+    item_totals = working.groupby("item_label", dropna=False)["total_msu"].sum(min_count=1)
+    unique_items = []
+    for item in preferred_items:
+        item_total = pd.to_numeric(item_totals.get(item, 0), errors="coerce")
+        if item in working["item_label"].unique() and pd.notna(item_total) and float(item_total) > 0:
+            unique_items.append(item)
+    sorted_items = sorted(
+        {
+            str(item).strip()
+            for item in working["item_label"].unique()
+            if pd.notna(pd.to_numeric(item_totals.get(str(item).strip(), 0), errors="coerce"))
+            and float(pd.to_numeric(item_totals.get(str(item).strip(), 0), errors="coerce")) > 0
+        },
+        key=lambda x: x.lower(),
+    )
+    remaining_items = [item for item in sorted_items if item not in unique_items]
     item_order = unique_items + remaining_items
-    if not item_order:
-        item_order = ["Other"]
 
     role_series = working["requester_role"]
     seen_roles: List[str] = []
@@ -306,20 +386,24 @@ def build_monthly_matrix(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[
             return "-"
         return f"{value:,.0f}"
 
+    def display_role(role_name: str) -> str:
+        normalized = str(role_name).strip()
+        return ROLE_DISPLAY_MAP.get(normalized, normalized)
+
     for current_role in role_order:
         role_subset = working[working["requester_role"] == current_role]
         if role_subset.empty:
             pivot = pd.DataFrame(0, index=item_order, columns=months)
         else:
             grouped = (
-                role_subset.groupby(["item_label", "availability_month"], dropna=False)["total_msu"]
+                role_subset.groupby(["item_label", "availability_month_norm"], dropna=False)["total_msu"]
                 .sum(min_count=1)
                 .reset_index()
             )
             pivot = (
                 grouped.pivot_table(
                     index="item_label",
-                    columns="availability_month",
+                    columns="availability_month_norm",
                     values="total_msu",
                     aggfunc="sum",
                     fill_value=0,
@@ -328,29 +412,59 @@ def build_monthly_matrix(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[
                 .reindex(columns=months, fill_value=0)
             )
 
-        for idx, item_name in enumerate(item_order):
+        role_has_rows = False
+        for item_name in item_order:
             row = {
-                "Role": current_role if idx == 0 else "",
+                "Role": display_role(current_role) if not role_has_rows else "",
                 "Item Text": item_name,
             }
             row_values = pivot.loc[item_name] if item_name in pivot.index else pd.Series(0, index=months)
             row_total = row_values.sum()
+            if pd.isna(row_total) or float(row_total) <= 0:
+                continue
             for month in months:
                 row[month] = format_value(row_values.get(month, 0))
             row[TOTAL_LABEL] = format_value(row_total)
             records.append(row)
+            role_has_rows = True
 
     totals = (
-        scope_df.groupby("availability_month", dropna=False)["total_msu"].sum(min_count=1)
+        scope_df.groupby("availability_month_norm", dropna=False)["total_msu"].sum(min_count=1)
         if not scope_df.empty
         else pd.Series(dtype=float)
     )
-    total_record = {"Role": TOTAL_LABEL, "Item Text": ""}
+
+    category_records: List[Dict[str, Any]] = []
+    if not scope_df.empty:
+        material_mask = scope_df["item_label"].astype(str).str.strip().str.lower().isin(["r material", "rm material"])
+        category_defs = [
+            ("Total FG", ~material_mask),
+            ("Total material", material_mask),
+        ]
+        for category_name, category_mask in category_defs:
+            category_df = scope_df[category_mask].copy()
+            if category_df.empty:
+                continue
+            category_totals = category_df.groupby("availability_month_norm", dropna=False)["total_msu"].sum(min_count=1)
+            category_total_value = category_totals.sum() if not category_totals.empty else 0
+            if pd.isna(category_total_value) or float(category_total_value) <= 0:
+                continue
+
+            category_record = {"Role": TOTAL_LABEL, "Item Text": category_name}
+            for month in months:
+                category_record[month] = format_value(category_totals.get(month, 0))
+            category_record[TOTAL_LABEL] = format_value(category_total_value)
+            category_records.append(category_record)
+
+    total_record = {"Role": TOTAL_LABEL, "Item Text": "Total"}
     total_value = totals.sum() if not totals.empty else 0
-    for month in months:
-        total_record[month] = format_value(totals.get(month, 0))
-    total_record[TOTAL_LABEL] = format_value(total_value)
-    records.append(total_record)
+    if pd.notna(total_value) and float(total_value) > 0:
+        for month in months:
+            total_record[month] = format_value(totals.get(month, 0))
+        total_record[TOTAL_LABEL] = format_value(total_value)
+        records.append(total_record)
+
+    records.extend(category_records)
 
     return columns, records
 
@@ -362,11 +476,33 @@ def build_item_summary(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[Di
         return columns, []
 
     scope_df = df.copy()
-    scope_df["Item Text"] = scope_df["Item Text"].astype(str).str.strip()
+    scope_df["Item Text"] = scope_df["Item Text"].fillna("").astype(str).str.strip()
+    scope_df.loc[
+        scope_df["Item Text"].str.lower().isin(["", "nan", "none"]),
+        "Item Text",
+    ] = "Other"
+    scope_df["total_msu"] = pd.to_numeric(scope_df.get("total_msu", 0), errors="coerce").fillna(0.0)
+    scope_df["availability_month_norm"] = scope_df["availability_month"].astype(str).str.strip()
+    scope_df.loc[
+        scope_df["availability_month_norm"].str.lower().isin(["", "nan", "none", "nat", "unknown", "unknow"]),
+        "availability_month_norm",
+    ] = pd.NA
     if role and role != ROLE_ALL_VALUE:
         scope_df = scope_df[scope_df["requester_role"] == role]
 
-    months = sort_month_labels(scope_df["availability_month"].dropna().tolist())
+    months = sort_month_labels(scope_df["availability_month_norm"].dropna().tolist())
+    if months:
+        month_totals = (
+            scope_df.dropna(subset=["availability_month_norm"])
+            .groupby("availability_month_norm", dropna=False)["total_msu"]
+            .sum(min_count=1)
+        )
+        filtered_months: List[str] = []
+        for month in months:
+            month_total = pd.to_numeric(month_totals.get(month, 0), errors="coerce")
+            if pd.notna(month_total) and float(month_total) > 0:
+                filtered_months.append(month)
+        months = filtered_months
     for month in months:
         columns.append({"name": format_month_label_slash(month), "id": month})
     columns.append({"name": TOTAL_LABEL, "id": TOTAL_LABEL})
@@ -379,18 +515,28 @@ def build_item_summary(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[Di
         return columns, [placeholder]
 
     preferred_items = ["R Material", "RM Material", "R Quotation", "FG Rolling"]
-    unique_items = [item for item in preferred_items if item in scope_df["Item Text"].unique()]
-    remaining_items = [
-        item
-        for item in sorted(scope_df["Item Text"].unique())
-        if item not in unique_items
-    ]
+    item_totals = scope_df.groupby("Item Text", dropna=False)["total_msu"].sum(min_count=1)
+    unique_items = []
+    for item in preferred_items:
+        item_total = pd.to_numeric(item_totals.get(item, 0), errors="coerce")
+        if item in scope_df["Item Text"].unique() and pd.notna(item_total) and float(item_total) > 0:
+            unique_items.append(item)
+    sorted_items = sorted(
+        {
+            str(item).strip()
+            for item in scope_df["Item Text"].unique()
+            if pd.notna(pd.to_numeric(item_totals.get(str(item).strip(), 0), errors="coerce"))
+            and float(pd.to_numeric(item_totals.get(str(item).strip(), 0), errors="coerce")) > 0
+        },
+        key=lambda x: x.lower(),
+    )
+    remaining_items = [item for item in sorted_items if item not in unique_items]
     item_order = unique_items + remaining_items
     if not item_order:
         item_order = ["未定义"]
 
     grouped = (
-        scope_df.groupby(["Item Text", "availability_month"], dropna=False)["total_msu"]
+        scope_df.groupby(["Item Text", "availability_month_norm"], dropna=False)["total_msu"]
         .sum(min_count=1)
         .reset_index()
     )
@@ -400,7 +546,7 @@ def build_item_summary(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[Di
         pivot = (
             grouped.pivot_table(
                 index="Item Text",
-                columns="availability_month",
+                columns="availability_month_norm",
                 values="total_msu",
                 aggfunc="sum",
                 fill_value=0,
@@ -418,22 +564,26 @@ def build_item_summary(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[Di
     for item_name in item_order:
         row = {"Item Text": item_name}
         row_values = pivot.loc[item_name] if item_name in pivot.index else pd.Series(0, index=months)
+        row_total = row_values.sum()
+        if pd.isna(row_total) or float(row_total) <= 0:
+            continue
         for month in months:
             row[month] = format_value(row_values.get(month, 0))
-        row[TOTAL_LABEL] = format_value(row_values.sum())
+        row[TOTAL_LABEL] = format_value(row_total)
         records.append(row)
 
     totals = (
-        scope_df.groupby("availability_month", dropna=False)["total_msu"].sum(min_count=1)
+        scope_df.groupby("availability_month_norm", dropna=False)["total_msu"].sum(min_count=1)
         if not scope_df.empty
         else pd.Series(dtype=float)
     )
     total_record = {"Item Text": TOTAL_LABEL}
     total_value = totals.sum() if not totals.empty else 0
-    for month in months:
-        total_record[month] = format_value(totals.get(month, 0))
-    total_record[TOTAL_LABEL] = format_value(total_value)
-    records.append(total_record)
+    if pd.notna(total_value) and float(total_value) > 0:
+        for month in months:
+            total_record[month] = format_value(totals.get(month, 0))
+        total_record[TOTAL_LABEL] = format_value(total_value)
+        records.append(total_record)
 
     return columns, records
 
@@ -442,6 +592,7 @@ def build_first_level_summary(
     df: pd.DataFrame,
     source_level_column: str = "First Level",
     display_level_column: str = "Level 1",
+    include_levels: List[str] | None = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     unmapped_labels = {"未映射", "unmapped"}
     display_zero_threshold = 0.5
@@ -460,6 +611,16 @@ def build_first_level_summary(
     working[source_level_column] = working[source_level_column].astype(str).str.strip()
     working["availability_month"] = working["availability_month"].astype(str)
     working["total_msu"] = pd.to_numeric(working["total_msu"], errors="coerce")
+
+    if include_levels:
+        include_level_keys = {str(level).strip().lower() for level in include_levels if str(level).strip()}
+        working = working[
+            working[source_level_column].astype(str).str.strip().str.lower().isin(include_level_keys)
+        ].copy()
+
+    if working.empty:
+        columns.append({"name": TOTAL_LABEL, "id": TOTAL_LABEL})
+        return columns, []
 
     def normalize_month(value: str) -> str:
         try:
@@ -524,6 +685,7 @@ def build_first_level_summary(
                     keep_mask.loc[idx] = False
         pivot = pivot.loc[keep_mask]
 
+    pivot = pivot[pivot[TOTAL_LABEL] > 0]
     pivot = pivot.sort_values(TOTAL_LABEL, ascending=False)
 
     totals_by_month = pivot[months_display].sum(axis=0)
@@ -543,10 +705,11 @@ def build_first_level_summary(
         records.append(record)
 
     total_record = {display_level_column: TOTAL_LABEL}
-    for month in months_display:
-        total_record[month] = fmt(totals_by_month.get(month, 0))
-    total_record[TOTAL_LABEL] = fmt(total_value)
-    records.append(total_record)
+    if pd.notna(total_value) and float(total_value) > 0:
+        for month in months_display:
+            total_record[month] = fmt(totals_by_month.get(month, 0))
+        total_record[TOTAL_LABEL] = fmt(total_value)
+        records.append(total_record)
 
     return columns, records
 
@@ -610,7 +773,7 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
         }
         for label in date_labels + [TOTAL_LABEL]:
             value = row.get(label, 0)
-            record[label] = f"{value:,.0f}" if pd.notna(value) else "-"
+            record[label] = f"{value:,.1f}" if pd.notna(value) else "-"
         records.append(record)
 
     return columns, records
@@ -645,6 +808,363 @@ def build_hc_idp_monthly_table(df: pd.DataFrame, as_percent: bool = False) -> Tu
 
     columns = [{"name": str(col), "id": str(col)} for col in working.columns]
     return columns, working.to_dict("records")
+
+
+def build_production_data_table(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+    base_cols = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
+    if df.empty:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    working = df.copy()
+    value_cols = ["MTD", "Left Production", "Current Month Total"]
+    source_value_cols = value_cols
+    source_month_suffix = ""
+
+    for col in base_cols:
+        if col not in working.columns:
+            working[col] = ""
+
+    month_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
+    ordered_cols = base_cols + month_cols
+
+    for display_col, source_col in zip(value_cols, source_value_cols):
+        if source_col in working.columns:
+            working[display_col] = working[source_col]
+        elif display_col not in working.columns:
+            working[display_col] = 0.0
+
+    for month in month_cols:
+        source_month_col = f"{month}{source_month_suffix}"
+        if source_month_col in working.columns:
+            working[month] = working[source_month_col]
+        elif month not in working.columns:
+            working[month] = 0.0
+
+    numeric_cols = ["MTD", "Left Production", "Current Month Total", *month_cols]
+    for col in numeric_cols:
+        working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+
+    working = working[working[numeric_cols].abs().sum(axis=1) > 0].copy()
+
+    for col in numeric_cols:
+        working[col] = working[col].apply(lambda v: "-" if pd.isna(v) or float(v) == 0.0 else f"{float(v):,.0f}")
+
+    for col in ["Plant", "Level1", "Level2"]:
+        working[col] = working[col].fillna("").astype(str).str.strip()
+
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, working[ordered_cols].to_dict("records")
+
+
+def build_production_data_table_no_level2(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+    base_cols = ["Plant", "Level1", "MTD", "Left Production", "Current Month Total"]
+    if df.empty:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    working = df.copy()
+    month_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
+    numeric_cols = ["MTD", "Left Production", "Current Month Total", *month_cols]
+    numeric_cols_msu = [f"{col}_MSU" for col in numeric_cols]
+    all_numeric_cols = [col for col in [*numeric_cols, *numeric_cols_msu] if col in working.columns]
+
+    for col in ["Plant", "Level1"]:
+        if col not in working.columns:
+            working[col] = ""
+        working[col] = working[col].fillna("").astype(str).str.strip()
+
+    for col in all_numeric_cols:
+        working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+
+    grouped = (
+        working.groupby(["Plant", "Level1"], dropna=False)[all_numeric_cols]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    factory_alias_map = {
+        "C810": "0386",
+        "D352": "1864",
+        "A673": "A868",
+    }
+    grouped["Plant"] = grouped["Plant"].astype(str).str.strip()
+    grouped["Level1"] = grouped["Level1"].astype(str).str.strip()
+    grouped["factory_group"] = grouped["Plant"].map(lambda v: factory_alias_map.get(str(v).strip(), str(v).strip()))
+
+    source_suffix = ""
+    for col in numeric_cols:
+        source_col = f"{col}{source_suffix}"
+        if source_col in grouped.columns:
+            grouped[col] = grouped[source_col]
+        elif col not in grouped.columns:
+            grouped[col] = 0.0
+
+    for col in numeric_cols:
+        grouped[col] = pd.to_numeric(grouped[col], errors="coerce").fillna(0.0)
+
+    grouped = grouped[grouped[numeric_cols].abs().sum(axis=1) > 0].copy()
+    level1_priority = {
+        "base": 0,
+        "pp": 1,
+        "hktw": 2,
+        "export": 3,
+        "ess": 4,
+    }
+    grouped["__level1_order"] = grouped["Level1"].astype(str).str.strip().str.lower().map(level1_priority).fillna(9)
+    grouped["__plant_primary_order"] = (grouped["Plant"] != grouped["factory_group"]).astype(int)
+    grouped = grouped.sort_values(
+        ["factory_group", "__plant_primary_order", "Plant", "__level1_order", "Level1"],
+        ascending=[True, True, True, True, True],
+    ).reset_index(drop=True)
+
+    ordered_cols = base_cols + month_cols
+    result_rows: List[Dict[str, Any]] = []
+    for factory, block in grouped.groupby("factory_group", dropna=False, sort=False):
+        block = block.copy()
+        for _, row in block.iterrows():
+            record: Dict[str, Any] = {
+                "Plant": str(row.get("Plant", "")).strip(),
+                "Level1": str(row.get("Level1", "")).strip(),
+                "__factory_group": str(factory).strip(),
+                "__row_type": "detail",
+                "__level1_key": str(row.get("Level1", "")).strip(),
+            }
+            for col in numeric_cols:
+                value = pd.to_numeric(row.get(col), errors="coerce")
+                record[col] = "-" if pd.isna(value) or float(value) == 0.0 else f"{float(value):,.0f}"
+            result_rows.append(record)
+
+        total_level_priority = {
+            "pp": 0,
+            "base": 1,
+            "hktw": 2,
+            "export": 3,
+            "ess": 4,
+        }
+        level_totals = (
+            block.groupby("Level1", dropna=False)[numeric_cols]
+            .sum(min_count=1)
+            .reset_index()
+        )
+        level_totals["__level_order"] = (
+            level_totals["Level1"].astype(str).str.strip().str.lower().map(total_level_priority).fillna(9)
+        )
+        level_totals = level_totals.sort_values(["__level_order", "Level1"], ascending=[True, True]).reset_index(drop=True)
+
+        for _, total_row in level_totals.iterrows():
+            level1_value = str(total_row.get("Level1", "")).strip()
+            subtotal_record: Dict[str, Any] = {
+                "Plant": f"Total-{level1_value}",
+                "Level1": "",
+                "__factory_group": str(factory).strip(),
+                "__row_type": "total_level1",
+                "__level1_key": level1_value,
+            }
+            for col in numeric_cols:
+                total_val = pd.to_numeric(total_row.get(col), errors="coerce")
+                subtotal_record[col] = "-" if pd.isna(total_val) or float(total_val) == 0.0 else f"{float(total_val):,.0f}"
+            result_rows.append(subtotal_record)
+
+        total_record: Dict[str, Any] = {
+            "Plant": "Total-ALL",
+            "Level1": "",
+            "__factory_group": str(factory).strip(),
+            "__row_type": "total_all",
+            "__level1_key": "",
+        }
+        for col in numeric_cols:
+            total_val = pd.to_numeric(block[col], errors="coerce").fillna(0.0).sum(min_count=1)
+            total_record[col] = "-" if pd.isna(total_val) or float(total_val) == 0.0 else f"{float(total_val):,.0f}"
+        result_rows.append(total_record)
+
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, result_rows
+
+
+def build_production_data_table_by_plant(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+    base_cols = ["Plant", "MTD", "Left Production", "Current Month"]
+    if df.empty:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    working = df.copy()
+    source_suffix = ""
+
+    month_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
+    numeric_cols = ["MTD", "Left Production", "Current Month Total", *month_cols]
+
+    if "Plant" not in working.columns:
+        working["Plant"] = ""
+    working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+
+    for col in numeric_cols:
+        source_col = f"{col}{source_suffix}"
+        if source_col in working.columns:
+            working[col] = pd.to_numeric(working[source_col], errors="coerce").fillna(0.0)
+        elif col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+        else:
+            working[col] = 0.0
+
+    grouped = (
+        working.groupby(["Plant"], dropna=False)[numeric_cols]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    grouped = grouped[grouped["Plant"] != ""].copy()
+    if grouped.empty:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    grouped = grouped[grouped[numeric_cols].abs().sum(axis=1) > 0].copy()
+
+    display_month_cols = month_cols[1:] if month_cols else []
+    grouped["Current Month"] = pd.to_numeric(grouped["Current Month Total"], errors="coerce").fillna(0.0)
+    ordered_cols = ["Plant", "MTD", "Left Production", "Current Month", *display_month_cols]
+
+    total_numeric_cols = ["MTD", "Left Production", "Current Month", *display_month_cols]
+    grouped = grouped[ordered_cols].copy()
+
+    def sum_for_plants(plants: List[str]) -> pd.Series:
+        subset = grouped[grouped["Plant"].isin(plants)]
+        if subset.empty:
+            return pd.Series({col: 0.0 for col in total_numeric_cols})
+        return subset[total_numeric_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).sum(min_count=1)
+
+    ordered_rows: List[Dict[str, Any]] = []
+
+    def append_row(label: str, plants: List[str]) -> None:
+        summed = sum_for_plants(plants)
+        row: Dict[str, Any] = {"Plant": label}
+        for col in total_numeric_cols:
+            row[col] = float(summed.get(col, 0.0))
+        ordered_rows.append(row)
+
+    append_row("0386", ["0386"])
+    append_row("C810", ["C810"])
+    append_row("HP Total", ["0386", "C810"])
+    append_row("A868", ["A868"])
+    append_row("A673", ["A673"])
+    append_row("TC Total", ["A868", "A673"])
+    append_row("1864", ["1864"])
+    append_row("D352", ["D352"])
+    append_row("XQ Total", ["1864", "D352"])
+    append_row("GC Total", grouped["Plant"].astype(str).str.strip().tolist())
+
+    grouped = pd.DataFrame(ordered_rows)
+
+    for col in total_numeric_cols:
+        grouped[col] = grouped[col].apply(lambda v: "-" if pd.isna(v) or float(v) == 0.0 else f"{float(v):,.0f}")
+
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, grouped[ordered_cols].to_dict("records")
+
+
+def build_production_data_table_by_plant_level(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+    base_cols = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month"]
+    if df.empty:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    working = df.copy()
+    for col in base_cols:
+        if col not in working.columns:
+            working[col] = ""
+        working[col] = working[col].fillna("").astype(str).str.strip()
+
+    month_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
+    display_month_cols = month_cols[1:] if month_cols else []
+    numeric_cols = ["MTD", "Left Production", "Current Month Total", *display_month_cols]
+    ordered_cols = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month", *display_month_cols]
+
+    for col in numeric_cols:
+        if col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+        else:
+            working[col] = 0.0
+
+    grouped = (
+        working.groupby(["Plant", "Level1", "Level2"], dropna=False)[numeric_cols]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    grouped["Current Month"] = pd.to_numeric(grouped["Current Month Total"], errors="coerce").fillna(0.0)
+    grouped = grouped[["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month", *display_month_cols]].copy()
+
+    data_numeric_cols = ["MTD", "Left Production", "Current Month", *display_month_cols]
+
+    if data_numeric_cols:
+        grouped = grouped[grouped[data_numeric_cols].abs().sum(axis=1) > 0].copy()
+
+    grouped = grouped.sort_values(["Plant", "Level1", "Level2"], ascending=[True, True, True]).reset_index(drop=True)
+
+    result_rows: List[Dict[str, Any]] = []
+
+    def append_plant_detail(plant: str) -> None:
+        subset = grouped[grouped["Plant"].astype(str).str.strip() == plant].copy()
+        if subset.empty:
+            return
+        for _, row in subset.iterrows():
+            record = {
+                "Plant": plant,
+                "Level1": str(row.get("Level1", "")).strip(),
+                "Level2": str(row.get("Level2", "")).strip(),
+            }
+            for col in data_numeric_cols:
+                record[col] = pd.to_numeric(row.get(col), errors="coerce")
+            result_rows.append(record)
+
+    def ensure_empty_plant_row(plant: str) -> None:
+        exists = any(str(row.get("Plant", "")).strip() == plant for row in result_rows)
+        if exists:
+            return
+        record: Dict[str, Any] = {"Plant": plant, "Level1": "", "Level2": ""}
+        for col in data_numeric_cols:
+            record[col] = 0.0
+        result_rows.append(record)
+
+    def append_group_total(label: str, plants: List[str]) -> None:
+        subset = grouped[grouped["Plant"].astype(str).str.strip().isin(plants)].copy()
+        if subset.empty:
+            month_sum = {col: 0.0 for col in data_numeric_cols}
+        else:
+            month_sum = {
+                col: pd.to_numeric(subset[col], errors="coerce").fillna(0.0).sum(min_count=1)
+                for col in data_numeric_cols
+            }
+        record = {
+            "Plant": label,
+            "Level1": "",
+            "Level2": "",
+            **month_sum,
+        }
+        result_rows.append(record)
+
+    append_plant_detail("0386")
+    append_plant_detail("C810")
+    ensure_empty_plant_row("C810")
+    append_group_total("HP Total", ["0386", "C810"])
+
+    append_plant_detail("A868")
+    append_plant_detail("A673")
+    append_group_total("TC Total", ["A868", "A673"])
+
+    append_plant_detail("1864")
+    append_plant_detail("D352")
+    append_group_total("XQ Total", ["1864", "D352"])
+
+    all_plants = grouped["Plant"].astype(str).str.strip().unique().tolist()
+    append_group_total("GC Total", all_plants)
+
+    result_df = pd.DataFrame(result_rows)
+    for col in data_numeric_cols:
+        result_df[col] = result_df[col].apply(lambda v: "-" if pd.isna(v) or float(v) == 0.0 else f"{float(v):,.0f}")
+
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, result_df[ordered_cols].to_dict("records")
 
 
 def build_demand_hs_dataframe(hc_idp_df: pd.DataFrame, monthly_level1_df: pd.DataFrame) -> pd.DataFrame:
@@ -788,32 +1308,44 @@ def build_demand_iya_by_quarter_table(
         for col in [c for c in frame.columns if c != "Prod Line AS"]:
             frame[col] = pd.to_numeric(frame[col], errors="coerce")
 
-    current_period = pd.Timestamp.today().to_period("M")
-    quarter_start_month = ((current_period.month - 1) // 3) * 3 + 1
-    quarter_months = [
-        pd.Period(f"{current_period.year}-{quarter_start_month + i:02d}", freq="M")
-        for i in range(3)
-    ]
-    quarter_month_labels = [p.strftime("%Y-%m") for p in quarter_months]
-    prev_quarter_month_labels = [(p - 12).strftime("%Y-%m") for p in quarter_months]
-
     month_letter = {
         1: "J", 2: "F", 3: "M", 4: "A", 5: "M", 6: "J",
         7: "J", 8: "A", 9: "S", 10: "O", 11: "N", 12: "D",
     }
-    quarter_tag = "".join(month_letter.get(p.month, "") for p in quarter_months)
 
-    col_lbe = f"{quarter_tag} LBE"
-    col_hs = f"{quarter_tag} HS"
-    col_lbe_iya = f"{quarter_tag} LBE IYA"
-    col_hs_iya = f"{quarter_tag} HS IYA"
+    current_period = pd.Timestamp.today().to_period("M")
+    quarter_start_month = ((current_period.month - 1) // 3) * 3 + 1
+    current_quarter_start = pd.Period(f"{current_period.year}-{quarter_start_month:02d}", freq="M")
+    quarter_starts = [current_quarter_start, current_quarter_start + 3]
 
-    columns = base_columns + [
-        {"name": col_lbe, "id": col_lbe},
-        {"name": col_hs, "id": col_hs},
-        {"name": col_lbe_iya, "id": col_lbe_iya},
-        {"name": col_hs_iya, "id": col_hs_iya},
-    ]
+    quarter_specs: List[Dict[str, Any]] = []
+    for q_start in quarter_starts:
+        quarter_months = [q_start + i for i in range(3)]
+        tag = "".join(month_letter.get(p.month, "") for p in quarter_months)
+        month_labels = [p.strftime("%Y-%m") for p in quarter_months]
+        prev_year_labels = [(p - 12).strftime("%Y-%m") for p in quarter_months]
+        quarter_specs.append(
+            {
+                "tag": tag,
+                "month_labels": month_labels,
+                "prev_year_labels": prev_year_labels,
+                "col_lbe": f"{tag} LBE",
+                "col_hs": f"{tag} HS",
+                "col_lbe_iya": f"{tag} LBE IYA",
+                "col_hs_iya": f"{tag} HS IYA",
+            }
+        )
+
+    columns = base_columns.copy()
+    for spec in quarter_specs:
+        columns.extend(
+            [
+                {"name": spec["col_lbe"], "id": spec["col_lbe"]},
+                {"name": spec["col_hs"], "id": spec["col_hs"]},
+                {"name": spec["col_lbe_iya"], "id": spec["col_lbe_iya"]},
+                {"name": spec["col_hs_iya"], "id": spec["col_hs_iya"]},
+            ]
+        )
 
     history_lookup: Dict[Tuple[str, str], float] = {}
     hist_month_cols = [c for c in history.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))]
@@ -835,28 +1367,575 @@ def build_demand_iya_by_quarter_table(
 
     records: List[Dict[str, Any]] = []
     for bucket in ["Base", "Promotion", "Total"]:
-        lbe_quarter = quarter_sum(lbe, bucket, quarter_month_labels)
-        hs_quarter = quarter_sum(hs, bucket, quarter_month_labels)
-        lbe_prev = sum(history_lookup.get((bucket.lower(), month), 0.0) for month in prev_quarter_month_labels)
-        hs_prev = lbe_prev
+        record: Dict[str, Any] = {"Prod Line": bucket}
+        for spec in quarter_specs:
+            lbe_quarter = quarter_sum(lbe, bucket, spec["month_labels"])
+            hs_quarter = quarter_sum(hs, bucket, spec["month_labels"])
+            lbe_prev = sum(history_lookup.get((bucket.lower(), month), 0.0) for month in spec["prev_year_labels"])
+            hs_prev = lbe_prev
 
-        lbe_iya = (lbe_quarter / lbe_prev * 100.0) if lbe_prev else None
-        hs_iya = (hs_quarter / hs_prev * 100.0) if hs_prev else None
+            lbe_iya = (lbe_quarter / lbe_prev * 100.0) if lbe_prev else None
+            hs_iya = (hs_quarter / hs_prev * 100.0) if hs_prev else None
 
-        records.append(
-            {
-                "Prod Line": bucket,
-                col_lbe: f"{lbe_quarter:,.0f}" if lbe_quarter else "-",
-                col_hs: f"{hs_quarter:,.0f}" if hs_quarter else "-",
-                col_lbe_iya: f"{lbe_iya:,.1f}%" if lbe_iya is not None else "-",
-                col_hs_iya: f"{hs_iya:,.1f}%" if hs_iya is not None else "-",
-            }
-        )
+            record[spec["col_lbe"]] = f"{lbe_quarter:,.0f}" if lbe_quarter else "-"
+            record[spec["col_hs"]] = f"{hs_quarter:,.0f}" if hs_quarter else "-"
+            record[spec["col_lbe_iya"]] = f"{lbe_iya:,.1f}%" if lbe_iya is not None else "-"
+            record[spec["col_hs_iya"]] = f"{hs_iya:,.1f}%" if hs_iya is not None else "-"
+
+        records.append(record)
 
     return columns, records
 
 
-def build_role_item_project_summary(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[Dict]]:
+def split_quarter_iya_tables(
+    columns: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+) -> Tuple[
+    Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]],
+    Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]]],
+]:
+    if not columns:
+        empty_columns = [{"name": "Prod Line", "id": "Prod Line"}]
+        return (
+            ("Quarter 1", empty_columns, []),
+            ("Quarter 2", empty_columns, []),
+        )
+
+    prod_line_col = columns[0]
+    metric_cols = columns[1:]
+    first_quarter_cols = metric_cols[:4]
+    second_quarter_cols = metric_cols[4:8]
+
+    def quarter_title(quarter_cols: List[Dict[str, Any]], fallback: str) -> str:
+        if not quarter_cols:
+            return fallback
+        first_name = str(quarter_cols[0].get("name", "")).strip()
+        if first_name:
+            return f"Demand IYA by quarter - {first_name.split(' ')[0]}"
+        return fallback
+
+    def build_subset(subset_cols: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        selected_cols = [prod_line_col, *subset_cols] if subset_cols else [prod_line_col]
+        selected_ids = [str(col.get("id", "")) for col in selected_cols]
+        subset_rows: List[Dict[str, Any]] = []
+        for row in rows or []:
+            subset_rows.append({col_id: row.get(col_id, "-") for col_id in selected_ids if col_id})
+        return selected_cols, subset_rows
+
+    q1_columns, q1_rows = build_subset(first_quarter_cols)
+    q2_columns, q2_rows = build_subset(second_quarter_cols)
+
+    return (
+        (quarter_title(first_quarter_cols, "Demand IYA by quarter - Quarter 1"), q1_columns, q1_rows),
+        (quarter_title(second_quarter_cols, "Demand IYA by quarter - Quarter 2"), q2_columns, q2_rows),
+    )
+
+
+def build_td_validation_table(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+    base_columns = [
+        {"name": "Version", "id": "Version"},
+        {"name": "Version Group", "id": "Version Group"},
+        {"name": "Prod Line", "id": "Prod Line"},
+    ]
+    if df.empty:
+        return base_columns + [{"name": "Total", "id": "Total"}], []
+
+    working = df.copy()
+    ordered_cols: List[str] = ["Version", "Version Group", "Prod Line"]
+    month_cols = sorted(
+        [col for col in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(col))],
+        key=lambda value: pd.Period(str(value), freq="M") if re.fullmatch(r"\d{4}-\d{2}", str(value)) else str(value),
+    )
+    ordered_cols.extend(month_cols)
+    if "Total" in working.columns:
+        ordered_cols.append("Total")
+
+    for col in ordered_cols:
+        if col not in working.columns:
+            working[col] = ""
+
+    numeric_cols = month_cols + (["Total"] if "Total" in ordered_cols else [])
+    for col in numeric_cols:
+        working[col] = pd.to_numeric(working[col], errors="coerce")
+
+    working = working[ordered_cols].fillna("")
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, working.to_dict("records")
+
+
+def build_td_validation_table_from_detail(td_detail_df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+    base_columns = [
+        {"name": "Version", "id": "Version"},
+        {"name": "Version Group", "id": "Version Group"},
+        {"name": "Prod Line", "id": "Prod Line"},
+    ]
+    if td_detail_df.empty:
+        return base_columns + [{"name": "Total", "id": "Total"}], []
+
+    working = td_detail_df.copy()
+    required_cols = ["Month", "Prod Line", "Current", "Previous", "Gap"]
+    if any(col not in working.columns for col in required_cols):
+        return base_columns + [{"name": "Total", "id": "Total"}], []
+
+    month_cols = sorted(
+        [str(col) for col in working["Month"].dropna().astype(str).unique() if re.fullmatch(r"\d{4}-\d{2}", str(col))],
+        key=lambda value: pd.Period(str(value), freq="M"),
+    )
+    if not month_cols:
+        return base_columns + [{"name": "Total", "id": "Total"}], []
+
+    for col in ["Current", "Previous", "Gap"]:
+        working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+
+    core = working[working["Prod Line"].astype(str).isin(["Base", "PP"])]
+    if core.empty:
+        return base_columns + [{"name": "Total", "id": "Total"}], []
+
+    grouped = (
+        core.groupby(["Prod Line", "Month"], dropna=False)[["Current", "Previous", "Gap"]]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    def make_frame(value_col: str) -> pd.DataFrame:
+        frame = (
+            grouped.pivot_table(
+                index="Prod Line",
+                columns="Month",
+                values=value_col,
+                aggfunc="sum",
+                fill_value=0,
+            )
+            .reindex(index=["Base", "PP"], fill_value=0)
+            .reindex(columns=month_cols, fill_value=0)
+        )
+        frame.loc["Total"] = frame.loc[["Base", "PP"]].sum(axis=0)
+        return frame
+
+    current_frame = make_frame("Current")
+    previous_frame = make_frame("Previous")
+    gap_frame = make_frame("Gap")
+
+    current_version = str(working["Current Version"].dropna().astype(str).iloc[0]) if "Current Version" in working.columns and not working["Current Version"].dropna().empty else "Current"
+    previous_version = str(working["Previous Version"].dropna().astype(str).iloc[0]) if "Previous Version" in working.columns and not working["Previous Version"].dropna().empty else "Previous"
+
+    version_rows = [
+        (f"Current ({current_version})", "Current", current_frame),
+        (f"Previous ({previous_version})", "Previous", previous_frame),
+        ("Gap", "Gap", gap_frame),
+    ]
+
+    records: List[Dict[str, Any]] = []
+    for idx_version, (version_label, version_group, frame) in enumerate(version_rows):
+        for idx, prod_line in enumerate(["Base", "PP", "Total"]):
+            row: Dict[str, Any] = {
+                "Version": version_label if idx == 0 else "",
+                "Version Group": version_group,
+                "Prod Line": prod_line,
+            }
+            total_value = 0
+            for month in month_cols:
+                int_value = int(round(float(frame.loc[prod_line, month])))
+                total_value += int_value
+                row[month] = int_value
+            row["Total"] = total_value
+            records.append(row)
+
+        if idx_version < len(version_rows) - 1:
+            spacer: Dict[str, Any] = {"Version": "", "Version Group": "", "Prod Line": ""}
+            for month in month_cols:
+                spacer[month] = ""
+            spacer["Total"] = ""
+            records.append(spacer)
+
+    ordered_cols = ["Version", "Version Group", "Prod Line", *month_cols, "Total"]
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, records
+
+
+def build_td_validation_style_data_conditional(columns: List[Dict]) -> List[Dict]:
+    rules: List[Dict] = list(PDE_STYLE_DATA_CONDITIONAL)
+    numeric_cols = [
+        col.get("id")
+        for col in columns
+        if re.fullmatch(r"\d{4}-\d{2}", str(col.get("id", ""))) or str(col.get("id", "")) == "Total"
+    ]
+
+    for col in numeric_cols:
+        rules.append(
+            {
+                "if": {"filter_query": f'{{Version Group}} = "Gap" && {{{col}}} < 0', "column_id": col},
+                "color": "#dc2626",
+                "fontWeight": "700",
+            }
+        )
+        rules.append(
+            {
+                "if": {"filter_query": f'{{Version Group}} = "Gap" && {{{col}}} > 0', "column_id": col},
+                "color": "#16a34a",
+                "fontWeight": "700",
+            }
+        )
+
+    rules.append(
+        {
+            "if": {"filter_query": '{Prod Line} = "Total"'},
+            "backgroundColor": "#eaf2ff",
+            "fontWeight": "700",
+        }
+    )
+    return rules
+
+
+def build_td_gap_detail_table(
+    active_cell: Dict[str, Any] | None,
+    table_rows: List[Dict[str, Any]] | None,
+    level2_active_cell: Dict[str, Any] | None,
+    level2_rows: List[Dict[str, Any]] | None,
+    td_detail_df: pd.DataFrame,
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def normalize_level2_label(value: Any) -> str:
+        text = str(value).strip() if value is not None else ""
+        key = text.lower()
+        if key in {"o-hot", "o hot"}:
+            return "O-Hot"
+        if key in {"o-non hot", "o non hot", "o-nonhot", "o nonhot"}:
+            return "O-Non Hot"
+        return text
+
+    month_name = "Selected Month"
+    month_col = ""
+    if active_cell and isinstance(active_cell.get("column_id"), str):
+        raw_month = str(active_cell.get("column_id")).strip()
+        if re.fullmatch(r"\d{4}-\d{2}", raw_month):
+            month_col = raw_month
+            try:
+                month_name = pd.Period(raw_month, freq="M").strftime("%b")
+            except Exception:
+                month_name = raw_month
+
+    columns = [
+        {"name": "APO Product", "id": "APO Product"},
+        {"name": "Des", "id": "Des"},
+        {"name": "Prod Line", "id": "Prod Line"},
+        {"name": "Current", "id": "Current"},
+        {"name": "Previous", "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+    style_data_conditional = list(PDE_STYLE_DATA_CONDITIONAL)
+    style_data_conditional.extend(
+        [
+            {
+                "if": {"filter_query": "{GAP} < 0", "column_id": "GAP"},
+                "color": "#dc2626",
+                "fontWeight": "700",
+            },
+            {
+                "if": {"filter_query": "{GAP} > 0", "column_id": "GAP"},
+                "color": "#16a34a",
+                "fontWeight": "700",
+            },
+        ]
+    )
+
+    if not table_rows:
+        return "GAP Difference Details（请先点击上方 GAP 月份单元格）", columns, [], style_data_conditional
+
+    if not active_cell:
+        return "GAP Difference Details（请先点击上方 GAP 月份单元格）", columns, [], style_data_conditional
+
+    row_index = active_cell.get("row")
+    if row_index is None or row_index < 0 or row_index >= len(table_rows):
+        return "GAP Difference Details（请先点击上方 GAP 月份单元格）", columns, [], style_data_conditional
+
+    if not re.fullmatch(r"\d{4}-\d{2}", month_col):
+        return "GAP Difference Details（请选择上方 GAP 行中的月份列）", columns, [], style_data_conditional
+
+    selected_row = table_rows[row_index]
+    if str(selected_row.get("Version Group", "")).strip() != "Gap":
+        return "GAP Difference Details（请选择上方 GAP 行中的月份列）", columns, [], style_data_conditional
+
+    prod_line = str(selected_row.get("Prod Line", "")).strip()
+    if prod_line not in {"Base", "PP", "Total"}:
+        return "GAP Difference Details（请选择上方 GAP 的 Base/PP/Total 行）", columns, [], style_data_conditional
+
+    if td_detail_df.empty:
+        return "GAP Difference Details（明细数据未生成，请先运行 pipeline）", columns, [], style_data_conditional
+
+    working = td_detail_df.copy()
+    required_cols = ["Month", "Prod Line", "APO Product", "Des", "Current", "Previous", "Gap"]
+    if any(col not in working.columns for col in required_cols):
+        return "GAP Difference Details（明细字段不完整）", columns, [], style_data_conditional
+
+    filtered = working[
+        (working["Month"].astype(str) == month_col)
+        & (working["Prod Line"].astype(str) == prod_line)
+    ].copy()
+    if filtered.empty:
+        return f"GAP Difference Details - {prod_line} / {month_col}（无明细）", columns, [], style_data_conditional
+
+    selected_level2 = ""
+    if level2_active_cell and level2_rows:
+        level2_row_index = level2_active_cell.get("row")
+        if isinstance(level2_row_index, int) and 0 <= level2_row_index < len(level2_rows):
+            selected_level2_row = level2_rows[level2_row_index]
+            selected_level2 = str(selected_level2_row.get("Level2", "")).strip()
+            selected_level2_prod_line = str(selected_level2_row.get("Prod Line", "")).strip()
+            if selected_level2 and selected_level2_prod_line in {"Base", "PP"} and selected_level2_prod_line == prod_line:
+                normalized_selected_level2 = normalize_level2_label(selected_level2)
+                filtered["Level2"] = filtered.get("Level2", "").fillna("").apply(normalize_level2_label)
+                filtered = filtered[filtered["Level2"].eq(normalized_selected_level2)].copy()
+
+    for col in ["Current", "Previous", "Gap"]:
+        filtered[col] = pd.to_numeric(filtered[col], errors="coerce").fillna(0).round().astype(int)
+
+    filtered = filtered[filtered["Gap"] != 0].copy()
+    if filtered.empty:
+        if selected_level2:
+            return f"GAP Difference Details - {prod_line} / {month_col} / {selected_level2}（无差异）", columns, [], style_data_conditional
+        return f"GAP Difference Details - {prod_line} / {month_col}（无差异）", columns, [], style_data_conditional
+
+    filtered["abs_gap"] = filtered["Gap"].abs()
+    filtered = filtered.sort_values(["abs_gap", "APO Product", "Des"], ascending=[False, True, True])
+
+    current_version = str(filtered["Current Version"].iloc[0]) if "Current Version" in filtered.columns and not filtered.empty else "Current"
+    previous_version = str(filtered["Previous Version"].iloc[0]) if "Previous Version" in filtered.columns and not filtered.empty else "Previous"
+
+    columns = [
+        {"name": "APO Product", "id": "APO Product"},
+        {"name": "Des", "id": "Des"},
+        {"name": "Prod Line", "id": "Prod Line"},
+        {"name": current_version, "id": "Current"},
+        {"name": previous_version, "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+
+    records: List[Dict[str, Any]] = []
+    for _, row in filtered.iterrows():
+        apo_raw = row.get("APO Product", "")
+        apo_num = pd.to_numeric(apo_raw, errors="coerce")
+        if pd.notna(apo_num):
+            apo_product = str(int(round(float(apo_num))))
+        else:
+            apo_product = str(apo_raw).strip()
+        description = str(row.get("Des", "")).strip()
+        records.append(
+            {
+                "APO Product": apo_product,
+                "Des": description,
+                "Prod Line": prod_line,
+                "Current": int(row.get("Current", 0)),
+                "Previous": int(row.get("Previous", 0)),
+                "GAP": int(row.get("Gap", 0)),
+            }
+        )
+
+    if selected_level2:
+        return f"GAP Difference Details - {prod_line} / {month_name} ({month_col}) / {selected_level2}", columns, records, style_data_conditional
+    return f"GAP Difference Details - {prod_line} / {month_name} ({month_col})", columns, records, style_data_conditional
+
+
+def build_td_gap_level2_table(
+    active_cell: Dict[str, Any] | None,
+    table_rows: List[Dict[str, Any]] | None,
+    td_detail_df: pd.DataFrame,
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    def normalize_level2_label(value: Any) -> str:
+        text = str(value).strip() if value is not None else ""
+        key = text.lower()
+        if key in {"o-hot", "o hot"}:
+            return "O-Hot"
+        if key in {"o-non hot", "o non hot", "o-nonhot", "o nonhot"}:
+            return "O-Non Hot"
+        return text
+
+    month_col = ""
+    month_name = "Selected Month"
+    if active_cell and isinstance(active_cell.get("column_id"), str):
+        raw_month = str(active_cell.get("column_id")).strip()
+        if re.fullmatch(r"\d{4}-\d{2}", raw_month):
+            month_col = raw_month
+            try:
+                month_name = pd.Period(raw_month, freq="M").strftime("%b")
+            except Exception:
+                month_name = raw_month
+
+    columns = [
+        {"name": "Prod Line", "id": "Prod Line"},
+        {"name": "Level2", "id": "Level2"},
+        {"name": "Current", "id": "Current"},
+        {"name": "Previous", "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+    style_data_conditional = list(PDE_STYLE_DATA_CONDITIONAL)
+    style_data_conditional.extend(
+        [
+            {
+                "if": {"filter_query": "{GAP} < 0", "column_id": "GAP"},
+                "color": "#dc2626",
+                "fontWeight": "700",
+            },
+            {
+                "if": {"filter_query": "{GAP} > 0", "column_id": "GAP"},
+                "color": "#16a34a",
+                "fontWeight": "700",
+            },
+            {
+                "if": {"filter_query": '{Prod Line} = "Total"'},
+                "backgroundColor": "#eaf2ff",
+                "fontWeight": "700",
+            },
+        ]
+    )
+
+    if not table_rows or not active_cell:
+        return "Level2 GAP Details（请先点击上方 GAP 月份单元格）", columns, [], style_data_conditional
+
+    row_index = active_cell.get("row")
+    if row_index is None or row_index < 0 or row_index >= len(table_rows):
+        return "Level2 GAP Details（请先点击上方 GAP 月份单元格）", columns, [], style_data_conditional
+
+    if not re.fullmatch(r"\d{4}-\d{2}", month_col):
+        return "Level2 GAP Details（请选择上方 GAP 行中的月份列）", columns, [], style_data_conditional
+
+    selected_row = table_rows[row_index]
+    if str(selected_row.get("Version Group", "")).strip() != "Gap":
+        return "Level2 GAP Details（请选择上方 GAP 行中的月份列）", columns, [], style_data_conditional
+
+    if td_detail_df.empty:
+        return "Level2 GAP Details（明细数据未生成，请先运行 pipeline）", columns, [], style_data_conditional
+
+    required_cols = ["Month", "Prod Line", "Level2", "Current", "Previous", "Gap", "Current Version", "Previous Version"]
+    working = td_detail_df.copy()
+    if any(col not in working.columns for col in required_cols):
+        return "Level2 GAP Details（缺少 Level2 字段，请先重跑 pipeline）", columns, [], style_data_conditional
+
+    month_df = working[working["Month"].astype(str) == month_col].copy()
+    if month_df.empty:
+        return f"Level2 GAP Details - {month_name} ({month_col})（无明细）", columns, [], style_data_conditional
+
+    for col in ["Current", "Previous", "Gap"]:
+        month_df[col] = pd.to_numeric(month_df[col], errors="coerce").fillna(0.0)
+
+    month_df["Level2"] = month_df["Level2"].fillna("").apply(normalize_level2_label)
+    month_df.loc[month_df["Level2"] == "", "Level2"] = "未映射"
+
+    grouped_all = (
+        month_df[month_df["Prod Line"].astype(str).isin(["Base", "PP"])]
+        .groupby(["Prod Line", "Level2"], dropna=False)[["Current", "Previous", "Gap"]]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    grouped = grouped_all.copy()
+    grouped["Gap Rounded"] = grouped["Gap"].round().astype(int)
+    grouped = grouped[grouped["Gap Rounded"] != 0].copy()
+    if grouped.empty:
+        return f"Level2 GAP Details - {month_name} ({month_col})（无差异）", columns, [], style_data_conditional
+
+    current_version = str(month_df["Current Version"].iloc[0]) if not month_df.empty else "Current"
+    previous_version = str(month_df["Previous Version"].iloc[0]) if not month_df.empty else "Previous"
+    columns = [
+        {"name": "Prod Line", "id": "Prod Line"},
+        {"name": "Level2", "id": "Level2"},
+        {"name": current_version, "id": "Current"},
+        {"name": previous_version, "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+
+    grouped["prod_order"] = grouped["Prod Line"].map({"Base": 0, "PP": 1}).fillna(2)
+    grouped = grouped.sort_values(["prod_order", "Level2"], ascending=[True, True])
+
+    records: List[Dict[str, Any]] = []
+    for _, row in grouped.iterrows():
+        records.append(
+            {
+                "Prod Line": str(row.get("Prod Line", "")).strip(),
+                "Level2": str(row.get("Level2", "")).strip(),
+                "Current": int(round(float(row.get("Current", 0)))),
+                "Previous": int(round(float(row.get("Previous", 0)))),
+                "GAP": int(row.get("Gap Rounded", 0)),
+            }
+        )
+
+    total_row = {
+        "Prod Line": "Total",
+        "Level2": "",
+        "Current": int(round(float(grouped_all["Current"].sum()))),
+        "Previous": int(round(float(grouped_all["Previous"].sum()))),
+        "GAP": int(round(float(grouped_all["Gap"].sum()))),
+    }
+    records.append(total_row)
+
+    return f"Level2 GAP Details - {month_name} ({month_col})", columns, records, style_data_conditional
+
+
+def normalize_requester_values(values: Any) -> List[str]:
+    if values is None:
+        return []
+    if isinstance(values, list):
+        cleaned = [str(v).strip() for v in values if str(v).strip()]
+        return sorted(set(cleaned))
+    text = str(values).strip()
+    return [text] if text else []
+
+
+def normalize_mrp_values(values: Any) -> List[str]:
+    if values is None:
+        return []
+    if isinstance(values, list):
+        cleaned = [str(v).strip() for v in values if str(v).strip()]
+        return sorted(set(cleaned))
+    text = str(values).strip()
+    return [text] if text else []
+
+
+def build_requester_email_options(df: pd.DataFrame, role: str) -> List[Dict[str, str]]:
+    if df.empty or "Requester Email" not in df.columns:
+        return []
+
+    working = df.copy()
+    if "requester_role" in working.columns:
+        working["requester_role"] = working["requester_role"].fillna(UNKNOWN_ROLE)
+    if role and role != ROLE_ALL_VALUE and "requester_role" in working.columns:
+        working = working[working["requester_role"] == role]
+
+    emails = sorted({
+        str(email).strip()
+        for email in working["Requester Email"].dropna().tolist()
+        if str(email).strip()
+    })
+    return [{"label": email, "value": email} for email in emails]
+
+
+def build_mrp_indicator_options(df: pd.DataFrame, role: str, requester_emails: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    if df.empty or "MRP Element Indicator" not in df.columns:
+        return []
+
+    working = df.copy()
+    if "requester_role" in working.columns:
+        working["requester_role"] = working["requester_role"].fillna(UNKNOWN_ROLE)
+    if role and role != ROLE_ALL_VALUE and "requester_role" in working.columns:
+        working = working[working["requester_role"] == role]
+
+    selected_emails = normalize_requester_values(requester_emails)
+    if selected_emails and "Requester Email" in working.columns:
+        working = working[working["Requester Email"].fillna("").astype(str).isin(set(selected_emails))]
+
+    indicators = sorted({
+        str(val).strip()
+        for val in working["MRP Element Indicator"].dropna().tolist()
+        if str(val).strip()
+    })
+    return [{"label": val, "value": val} for val in indicators]
+
+
+def build_role_item_project_summary(
+    df: pd.DataFrame,
+    role: str,
+    requester_emails: Optional[List[str]] = None,
+    mrp_indicators: Optional[List[str]] = None,
+) -> Tuple[List[Dict], List[Dict]]:
     base_columns = [
         {"name": "Role", "id": "Role"},
         {"name": "Item Text", "id": "Item Text"},
@@ -869,6 +1948,7 @@ def build_role_item_project_summary(df: pd.DataFrame, role: str) -> Tuple[List[D
     working["requester_role"] = working.get("requester_role", UNKNOWN_ROLE).fillna(UNKNOWN_ROLE)
     working["Item Text"] = working.get("Item Text", "").astype(str)
     working["MRP Element Indicator"] = working.get("MRP Element Indicator", "").astype(str)
+    working["Requester Email"] = working.get("Requester Email", "").fillna("").astype(str).str.strip()
 
     if "availability_month" not in working.columns:
         working["availability_month"] = working.get("Availability Date", pd.NaT)
@@ -876,6 +1956,14 @@ def build_role_item_project_summary(df: pd.DataFrame, role: str) -> Tuple[List[D
 
     if role and role != ROLE_ALL_VALUE:
         working = working[working["requester_role"] == role]
+
+    selected_emails = normalize_requester_values(requester_emails)
+    if selected_emails:
+        working = working[working["Requester Email"].isin(set(selected_emails))]
+
+    selected_mrp_indicators = normalize_mrp_values(mrp_indicators)
+    if selected_mrp_indicators:
+        working = working[working["MRP Element Indicator"].astype(str).isin(set(selected_mrp_indicators))]
 
     if working.empty:
         return base_columns + [{"name": TOTAL_LABEL, "id": TOTAL_LABEL}], []
@@ -911,14 +1999,20 @@ def build_role_item_project_summary(df: pd.DataFrame, role: str) -> Tuple[List[D
     def fmt(value: float) -> str:
         if pd.isna(value) or value == 0:
             return "-"
-        return f"{value:,.2f}"
+        return f"{value:,.1f}"
+
+    def display_role(role_name: str) -> str:
+        normalized = str(role_name).strip()
+        return ROLE_DISPLAY_MAP.get(normalized, normalized)
 
     records_with_totals: List[Tuple[float, Dict]] = []
     for _, row in pivot.iterrows():
+        role_raw = row.get("Role", UNKNOWN_ROLE) or UNKNOWN_ROLE
         record = {
-            "Role": row.get("Role", UNKNOWN_ROLE) or UNKNOWN_ROLE,
+            "Role": display_role(role_raw),
             "Item Text": row.get("Item Text", "未定义") or "未定义",
             "MRP Element Indicator": row.get("MRP Element Indicator", "未定义") or "未定义",
+            "__role_raw": role_raw,
         }
         for month in months:
             record[month] = fmt(row.get(month, 0))
@@ -930,7 +2024,13 @@ def build_role_item_project_summary(df: pd.DataFrame, role: str) -> Tuple[List[D
     return columns, sorted_records
 
 
-def build_modal_detail_rows(df: pd.DataFrame, role: str, item_text: str, mrp_indicator: str) -> Tuple[List[Dict], List[Dict]]:
+def build_modal_detail_rows(
+    df: pd.DataFrame,
+    role: str,
+    item_text: str,
+    mrp_indicator: str,
+    requester_emails: Optional[List[str]] = None,
+) -> Tuple[List[Dict], List[Dict]]:
     if df.empty:
         columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
         return columns, []
@@ -942,6 +2042,10 @@ def build_modal_detail_rows(df: pd.DataFrame, role: str, item_text: str, mrp_ind
         working = working[working["Item Text"].astype(str) == str(item_text)]
     if mrp_indicator and "MRP Element Indicator" in working.columns:
         working = working[working["MRP Element Indicator"].astype(str) == str(mrp_indicator)]
+
+    selected_emails = normalize_requester_values(requester_emails)
+    if selected_emails and "Requester Email" in working.columns:
+        working = working[working["Requester Email"].fillna("").astype(str).isin(set(selected_emails))]
 
     if working.empty:
         columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
@@ -984,7 +2088,7 @@ def build_role_options(df: pd.DataFrame) -> List[Dict[str, Any]]:
         return {"label": html.Span(label, className="role-chip-label"), "value": value}
 
     options: List[Dict[str, Any]] = [make_option("ALL", ROLE_ALL_VALUE)]
-    options.extend(make_option(role, role) for role in roles)
+    options.extend(make_option(ROLE_DISPLAY_MAP.get(role, role), role) for role in roles)
     return options
 
 
@@ -1063,7 +2167,7 @@ def build_role_trend(df: pd.DataFrame, role: str) -> go.Figure:
             x=0.5,
             y=0.5,
             showarrow=False,
-            font=dict(color="#7f8c8d", size=14),
+            font=dict(color="#7f8c8d", size=14, family=GLOBAL_FONT_FAMILY),
         )
 
     fig.update_layout(
@@ -1075,7 +2179,7 @@ def build_role_trend(df: pd.DataFrame, role: str) -> go.Figure:
         template="plotly_white",
         plot_bgcolor="#ffffff",
         paper_bgcolor="#ffffff",
-        font=dict(color="#334155"),
+        font=dict(color="#334155", family=GLOBAL_FONT_FAMILY),
         colorway=["#2563eb", "#0ea5e9", "#14b8a6", "#6366f1", "#f59e0b", "#ec4899"],
         margin=dict(l=30, r=20, t=70, b=50),
     )
@@ -1098,6 +2202,9 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     monthly_requester = pd.DataFrame(data_bundle["monthly_requester"])
     monthly_level1 = pd.DataFrame(data_bundle.get("monthly_level1", []))
     hc_idp_monthly = pd.DataFrame(data_bundle.get("hc_idp_monthly", []))
+    production_data_df = pd.DataFrame(data_bundle.get("production_data", []))
+    production_data_by_level_df = pd.DataFrame(data_bundle.get("production_data_by_level", []))
+    td_validation_detail = pd.DataFrame(data_bundle.get("td_validation_detail", []))
     historical_shipment = pd.DataFrame(data_bundle.get("historical_shipment", []))
     pde_alerts = pd.DataFrame(data_bundle["pde_alerts"])
     request_details = load_request_details(cfg)
@@ -1109,8 +2216,21 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     summary_columns, summary_data = build_item_summary(monthly_requester, default_role)
     pde_columns, pde_data = build_pde_matrix(pde_alerts)
     summary_drill_columns, summary_drill_rows = build_role_item_project_summary(request_details, default_role)
+    drill_requester_options = build_requester_email_options(request_details, default_role)
+    drill_mrp_options = build_mrp_indicator_options(request_details, default_role)
 
-    level1_columns, level1_rows = build_first_level_summary(monthly_level1, source_level_column="First Level", display_level_column="Level 1")
+    level1_core_columns, level1_core_rows = build_first_level_summary(
+        monthly_level1,
+        source_level_column="First Level",
+        display_level_column="Level 1",
+        include_levels=["Base", "PP"],
+    )
+    level1_hktw_ess_columns, level1_hktw_ess_rows = build_first_level_summary(
+        monthly_level1,
+        source_level_column="First Level",
+        display_level_column="Level 1",
+        include_levels=["HKTW", "ESS"],
+    )
     hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
     hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
     hc_idp_hs_columns, hc_idp_hs_rows = build_hc_idp_monthly_table(hc_idp_hs_df)
@@ -1121,6 +2241,14 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         hc_idp_hs_df,
         historical_shipment,
     )
+    (quarter1_title, quarter1_columns, quarter1_rows), (quarter2_title, quarter2_columns, quarter2_rows) = split_quarter_iya_tables(
+        hc_idp_quarter_iya_columns,
+        hc_idp_quarter_iya_rows,
+    )
+    production_plant_columns, production_plant_rows = build_production_data_table_by_plant(production_data_df)
+    production_level_columns, production_level_rows = build_production_data_table_by_plant_level(production_data_by_level_df)
+    td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
+    td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
 
     overview_tab = dcc.Tab(
         label="Supply Protection",
@@ -1136,7 +2264,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         html.Span(metrics["total_msu"], id="metric-total-msu", className="metric-value"),
                     ]),
                     html.Div([
-                        html.H4("Item Text 数量"),
+                        html.H4("Item Text"),
                         html.Span(metrics["unique_items"], id="metric-item-count", className="metric-value"),
                     ]),
                     html.Div([
@@ -1184,7 +2312,14 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                     data=role_matrix_data,
                                     style_header=PDE_STYLE_HEADER,
                                     style_cell=PDE_STYLE_CELL,
-                                    style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                    style_data_conditional=[
+                                        *PDE_STYLE_DATA_CONDITIONAL,
+                                        {
+                                            "if": {"filter_query": '{Role} = "Total" && {Item Text} = "Total"'},
+                                            "fontWeight": "700",
+                                            "backgroundColor": "#eaf2ff",
+                                        },
+                                    ],
                                     style_cell_conditional=[
                                         {"if": {"column_id": "Role"}, "textAlign": "left"},
                                         {"if": {"column_id": "Item Text"}, "textAlign": "left"},
@@ -1192,6 +2327,21 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                     page_size=20,
                                     style_table={"overflowX": "auto"},
                                 )
+                            ),
+                            html.Div(
+                                style={"marginTop": "12px", "color": "#334155", "fontSize": "14px"},
+                                children=[
+                                    html.Strong("Item Text Description"),
+                                    html.Ul(
+                                        style={"margin": "6px 0 0 18px", "padding": "0"},
+                                        children=[
+                                            html.Li("R Quotation/R Component: FG Protection"),
+                                            html.Li("R Material: Material Protection with rolling delay"),
+                                            html.Li("FG Rolling: FG Protection with rolling delay"),
+                                            html.Li("RM Material: RM Protection"),
+                                        ],
+                                    ),
+                                ],
                             ),
                         ],
                     ),
@@ -1208,7 +2358,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
-                        page_size=6,
+                        page_action="none",
                         style_table={"overflowX": "auto"},
                     ),
                 ],
@@ -1224,6 +2374,24 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                        style_cell_conditional=[
+                            {
+                                "if": {"column_id": "Requester Email"},
+                                "textAlign": "center",
+                                "whiteSpace": "normal",
+                                "height": "auto",
+                                "minWidth": "180px",
+                                "width": "auto",
+                            },
+                            {
+                                "if": {"column_id": "Project"},
+                                "textAlign": "center",
+                                "whiteSpace": "normal",
+                                "height": "auto",
+                                "minWidth": "320px",
+                                "width": "auto",
+                            },
+                        ],
                         page_size=10,
                         style_table={"overflowX": "auto"},
                     ),
@@ -1244,8 +2412,50 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="drill-header",
                         children=[
-                            html.H3("Role × Item × Project 汇总"),
+                            html.Div(
+                                style={"display": "flex", "justifyContent": "space-between", "alignItems": "center", "gap": "12px"},
+                                children=[
+                                    html.H3("Role × Item × Project", style={"margin": "0"}),
+                                    html.Div(
+                                        dcc.RadioItems(
+                                            id="drill-role-filter",
+                                            options=[
+                                                {"label": html.Span("ALL", className="role-chip-label"), "value": ROLE_ALL_VALUE},
+                                                {"label": html.Span("NI", className="role-chip-label"), "value": "IOL"},
+                                                {"label": html.Span("On Going", className="role-chip-label"), "value": "CSP"},
+                                                {"label": html.Span("Cross Region", className="role-chip-label"), "value": "CROSS REGION"},
+                                            ],
+                                            value=ROLE_ALL_VALUE,
+                                            className="role-toggle",
+                                        ),
+                                        className="role-button-group",
+                                    ),
+                                ],
+                            ),
                             html.P("点击任意组合即可查看对应的所有物料请求明细"),
+                            html.Div(
+                                style={"display": "grid", "gridTemplateColumns": "minmax(300px, 1fr) minmax(260px, 0.8fr)", "gap": "10px", "maxWidth": "860px"},
+                                children=[
+                                    dcc.Dropdown(
+                                        id="drill-requester-filter",
+                                        options=drill_requester_options,
+                                        value=[],
+                                        placeholder="筛选 Requester Email（可多选+搜索）",
+                                        multi=True,
+                                        clearable=True,
+                                        searchable=True,
+                                    ),
+                                    dcc.Dropdown(
+                                        id="drill-mrp-filter",
+                                        options=drill_mrp_options,
+                                        value=[],
+                                        placeholder="筛选 MRP Element Indicator（可多选+搜索）",
+                                        multi=True,
+                                        clearable=True,
+                                        searchable=True,
+                                    ),
+                                ],
+                            ),
                         ],
                     ),
                     dcc.Loading(
@@ -1261,7 +2471,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 page_size=10,
                                 style_table={"overflowX": "auto"},
                                 sort_action="native",
-                                filter_action="native",
+                                filter_action="none",
                             )
                         )
                     ),
@@ -1273,6 +2483,8 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 children=[
                                     html.H4("明细列表"),
                                     html.Span("请选择上方 Role × Item × Project 组合", id="drill-detail-title"),
+                                    html.Button("下载全部明细", id="drill-detail-export-btn", n_clicks=0),
+                                    dcc.Download(id="drill-detail-download"),
                                 ],
                             ),
                             dcc.Loading(
@@ -1385,12 +2597,26 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card demand-table-card--left",
                         children=[
-                            html.H3("Supply Protection"),
+                            html.H3("Supply Protection (PP + Base)"),
                             dcc.Loading(
                                 DataTable(
-                                    id="first-level-table",
-                                    columns=level1_columns,
-                                    data=level1_rows,
+                                    id="first-level-core-table",
+                                    columns=level1_core_columns,
+                                    data=level1_core_rows,
+                                    style_header=PDE_STYLE_HEADER,
+                                    style_cell=PDE_STYLE_CELL,
+                                    style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                    page_size=10,
+                                    style_table={"overflowX": "auto", "marginBottom": "16px"},
+                                    sort_action="native",
+                                )
+                            ),
+                            html.H3("Supply Protection (HKTW + ESS)"),
+                            dcc.Loading(
+                                DataTable(
+                                    id="first-level-hktw-ess-table",
+                                    columns=level1_hktw_ess_columns,
+                                    data=level1_hktw_ess_rows,
                                     style_header=PDE_STYLE_HEADER,
                                     style_cell=PDE_STYLE_CELL,
                                     style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
@@ -1404,12 +2630,26 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card demand-table-card--right",
                         children=[
-                            html.H3("Demand IYA by quarter"),
+                            html.H3(quarter1_title),
                             dcc.Loading(
                                 DataTable(
-                                    id="hc-idp-quarter-iya-table",
-                                    columns=hc_idp_quarter_iya_columns,
-                                    data=hc_idp_quarter_iya_rows,
+                                    id="hc-idp-quarter1-iya-table",
+                                    columns=quarter1_columns,
+                                    data=quarter1_rows,
+                                    style_header=PDE_STYLE_HEADER,
+                                    style_cell=PDE_STYLE_CELL,
+                                    style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                    page_size=10,
+                                    style_table={"overflowX": "auto", "marginBottom": "16px"},
+                                    sort_action="native",
+                                )
+                            ),
+                            html.H3(quarter2_title),
+                            dcc.Loading(
+                                DataTable(
+                                    id="hc-idp-quarter2-iya-table",
+                                    columns=quarter2_columns,
+                                    data=quarter2_rows,
                                     style_header=PDE_STYLE_HEADER,
                                     style_cell=PDE_STYLE_CELL,
                                     style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
@@ -1425,6 +2665,206 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         ],
     )
 
+    data_validation_tab = dcc.Tab(
+        label="Demand Data",
+        value="data-validation",
+        className="page-tab",
+        selected_className="page-tab--active",
+        children=[
+            html.Div(
+                className="summary-panel",
+                children=[
+                    html.H3("TD Version Monthly Comparison"),
+                    DataTable(
+                        id="td-validation-table",
+                        columns=td_validation_columns,
+                        data=td_validation_rows,
+                        hidden_columns=["Version Group"],
+                        css=[{"selector": ".show-hide", "rule": "display: none"}],
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=td_validation_styles,
+                        style_cell_conditional=[
+                            {
+                                "if": {"column_id": "Version"},
+                                "textAlign": "left",
+                                "whiteSpace": "normal",
+                                "width": "auto",
+                                "minWidth": "110px",
+                                "maxWidth": "190px",
+                            },
+                            {"if": {"column_id": "Prod Line"}, "textAlign": "left"},
+                        ],
+                        page_size=20,
+                        style_table={"overflowX": "auto"},
+                    ),
+                    html.Div(
+                        style={
+                            "marginTop": "18px",
+                            "display": "grid",
+                            "gridTemplateColumns": "1fr 1fr",
+                            "gap": "14px",
+                            "alignItems": "start",
+                        },
+                        children=[
+                            html.Div(
+                                style={"width": "100%", "minWidth": "0"},
+                                children=[
+                                    html.H4("Level2 GAP Details（请先点击上方 GAP 行）", id="td-gap-level2-title"),
+                                    html.Div(
+                                        style={"marginBottom": "10px"},
+                                        children=[
+                                            html.Button("Export Level2 Gap to Excel", id="td-gap-level2-export-btn", n_clicks=0),
+                                            dcc.Download(id="td-gap-level2-download"),
+                                        ],
+                                    ),
+                                    DataTable(
+                                        id="td-gap-level2-table",
+                                        columns=[
+                                            {"name": "Prod Line", "id": "Prod Line"},
+                                            {"name": "Level2", "id": "Level2"},
+                                            {"name": "Current", "id": "Current"},
+                                            {"name": "Previous", "id": "Previous"},
+                                            {"name": "GAP", "id": "GAP"},
+                                        ],
+                                        data=[],
+                                        style_header=PDE_STYLE_HEADER,
+                                        style_cell=PDE_STYLE_CELL,
+                                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                        style_cell_conditional=[
+                                            {"if": {"column_id": "Prod Line"}, "textAlign": "left", "minWidth": "80px", "width": "100px"},
+                                            {"if": {"column_id": "Level2"}, "textAlign": "left", "minWidth": "140px", "width": "180px"},
+                                        ],
+                                        sort_action="native",
+                                        sort_mode="single",
+                                        page_size=30,
+                                        style_table={"overflowX": "auto", "width": "100%", "maxWidth": "100%"},
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                style={"width": "100%", "minWidth": "0"},
+                                children=[
+                                    html.H4("GAP Difference Details（请先点击上方 GAP 行）", id="td-gap-detail-title"),
+                                    html.Div(
+                                        style={"marginBottom": "10px"},
+                                        children=[
+                                            html.Button("Export Gap Details to Excel", id="td-gap-export-btn", n_clicks=0),
+                                            dcc.Download(id="td-gap-detail-download"),
+                                        ],
+                                    ),
+                                    DataTable(
+                                        id="td-gap-detail-table",
+                                        columns=[
+                                            {"name": "APO Product", "id": "APO Product"},
+                                            {"name": "Des", "id": "Des"},
+                                            {"name": "Prod Line", "id": "Prod Line"},
+                                            {"name": "Current", "id": "Current"},
+                                            {"name": "Previous", "id": "Previous"},
+                                            {"name": "GAP", "id": "GAP"},
+                                        ],
+                                        data=[],
+                                        style_header=PDE_STYLE_HEADER,
+                                        style_cell=PDE_STYLE_CELL,
+                                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                        style_cell_conditional=[
+                                            {"if": {"column_id": "APO Product"}, "textAlign": "left", "minWidth": "110px", "width": "120px", "maxWidth": "140px"},
+                                            {"if": {"column_id": "Des"}, "textAlign": "left", "whiteSpace": "nowrap", "overflow": "hidden", "textOverflow": "ellipsis", "minWidth": "160px", "width": "220px", "maxWidth": "280px"},
+                                            {"if": {"column_id": "Prod Line"}, "textAlign": "left", "minWidth": "80px", "width": "90px"},
+                                        ],
+                                        sort_action="native",
+                                        sort_mode="single",
+                                        sort_by=[{"column_id": "GAP", "direction": "asc"}],
+                                        page_size=18,
+                                        style_table={"overflowX": "auto", "width": "100%", "minWidth": "100%", "maxWidth": "100%"},
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+    )
+
+    production_data_tab = dcc.Tab(
+        label="Production Data",
+        value="production-data",
+        className="page-tab",
+        selected_className="page-tab--active",
+        children=[
+            html.Div(
+                className="summary-panel",
+                children=[
+                    html.H3("Production Data"),
+                    html.P("说明：当前数据不可读，验证中。"),
+                    html.H4("Production Data (By Plant)"),
+                    DataTable(
+                        id="production-data-plant-table",
+                        columns=production_plant_columns,
+                        data=production_plant_rows,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
+                    ),
+                    html.H4("Production Data (By Plant / Level1 / Level2)", style={"marginTop": "18px"}),
+                    DataTable(
+                        id="production-data-level-table",
+                        columns=production_level_columns,
+                        data=production_level_rows,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level1"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level2"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
+                    ),
+                ],
+            ),
+        ],
+    )
+
     return html.Div(
         className="page",
         children=[
@@ -1435,11 +2875,15 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 className="hero",
                 children=[
                     html.Div(
-                        [html.H1("Hair Care Protection Command Center"), html.P("(MVP)")]
+                        [html.H1("Hair Care Supply Protection Command Center"), html.P("(MVP)")]
                     )
                 ],
             ),
-            dcc.Tabs(id="page-tabs", value="demand-assumption", children=[demand_assumption_tab, overview_tab, drill_tab]),
+            dcc.Tabs(
+                id="page-tabs",
+                value="demand-assumption",
+                children=[demand_assumption_tab, overview_tab, drill_tab, data_validation_tab, production_data_tab],
+            ),
         ],
     )
 
@@ -1474,6 +2918,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("role-trend", "figure"),
         Output("pde-table", "columns"),
         Output("pde-table", "data"),
+        Output("drill-requester-filter", "options"),
+        Output("drill-requester-filter", "value"),
+        Output("drill-mrp-filter", "options"),
+        Output("drill-mrp-filter", "value"),
         Output("role-item-mrp-summary", "columns"),
         Output("role-item-mrp-summary", "data"),
         Output("hc-idp-monthly-table", "columns"),
@@ -1484,26 +2932,61 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("hc-idp-hs-table", "data"),
         Output("hc-idp-hs-iya-table", "columns"),
         Output("hc-idp-hs-iya-table", "data"),
-        Output("hc-idp-quarter-iya-table", "columns"),
-        Output("hc-idp-quarter-iya-table", "data"),
-        Output("first-level-table", "columns"),
-        Output("first-level-table", "data"),
+        Output("hc-idp-quarter1-iya-table", "columns"),
+        Output("hc-idp-quarter1-iya-table", "data"),
+        Output("hc-idp-quarter2-iya-table", "columns"),
+        Output("hc-idp-quarter2-iya-table", "data"),
+        Output("first-level-core-table", "columns"),
+        Output("first-level-core-table", "data"),
+        Output("first-level-hktw-ess-table", "columns"),
+        Output("first-level-hktw-ess-table", "data"),
+        Output("td-validation-table", "columns"),
+        Output("td-validation-table", "data"),
+        Output("td-validation-table", "style_data_conditional"),
+        Output("production-data-plant-table", "columns"),
+        Output("production-data-plant-table", "data"),
+        Output("production-data-level-table", "columns"),
+        Output("production-data-level-table", "data"),
         Input("data-store", "data"),
         Input("role-filter", "value"),
+        Input("drill-role-filter", "value"),
+        Input("drill-requester-filter", "value"),
+        Input("drill-mrp-filter", "value"),
     )
-    def update_visuals(data, role_value):
+    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value):
         monthly_requester = pd.DataFrame(data.get("monthly_requester", []))
         monthly_level1 = pd.DataFrame(data.get("monthly_level1", []))
         hc_idp_monthly = pd.DataFrame(data.get("hc_idp_monthly", []))
+        production_data_df = pd.DataFrame(data.get("production_data", []))
+        production_data_by_level_df = pd.DataFrame(data.get("production_data_by_level", []))
+        td_validation_detail = pd.DataFrame(data.get("td_validation_detail", []))
         historical_shipment = pd.DataFrame(data.get("historical_shipment", []))
         pde_alerts = pd.DataFrame(data.get("pde_alerts", []))
         request_details = load_request_details(cfg)
         table_columns, table_data = build_monthly_matrix(monthly_requester, ROLE_ALL_VALUE)
         selected_role = role_value or ROLE_ALL_VALUE
+        selected_drill_role = drill_role_value or ROLE_ALL_VALUE
+        drill_requester_options = build_requester_email_options(request_details, selected_drill_role)
+        selected_requesters = normalize_requester_values(drill_requester_value)
+        valid_requesters = [
+            requester for requester in selected_requesters
+            if any(option.get("value") == requester for option in drill_requester_options)
+        ]
+        drill_mrp_options = build_mrp_indicator_options(request_details, selected_drill_role, valid_requesters)
+        selected_mrp_indicators = normalize_mrp_values(drill_mrp_value)
+        valid_mrp_indicators = [
+            indicator for indicator in selected_mrp_indicators
+            if any(option.get("value") == indicator for option in drill_mrp_options)
+        ]
         summary_columns, summary_data = build_item_summary(monthly_requester, selected_role)
         role_fig = build_role_trend(monthly_requester, selected_role)
         pde_columns, pde_records = build_pde_matrix(pde_alerts)
-        drill_columns, drill_rows = build_role_item_project_summary(request_details, selected_role)
+        drill_columns, drill_rows = build_role_item_project_summary(
+            request_details,
+            selected_drill_role,
+            valid_requesters,
+            valid_mrp_indicators,
+        )
         hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
         hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
         hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
@@ -1514,7 +2997,26 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             hc_idp_hs_df,
             historical_shipment,
         )
-        level1_columns, level1_rows = build_first_level_summary(monthly_level1, source_level_column="First Level", display_level_column="Level 1")
+        (_, quarter1_columns, quarter1_rows), (_, quarter2_columns, quarter2_rows) = split_quarter_iya_tables(
+            hc_idp_quarter_iya_columns,
+            hc_idp_quarter_iya_rows,
+        )
+        td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
+        td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
+        production_plant_columns, production_plant_rows = build_production_data_table_by_plant(production_data_df)
+        production_level_columns, production_level_rows = build_production_data_table_by_plant_level(production_data_by_level_df)
+        level1_core_columns, level1_core_rows = build_first_level_summary(
+            monthly_level1,
+            source_level_column="First Level",
+            display_level_column="Level 1",
+            include_levels=["Base", "PP"],
+        )
+        level1_hktw_ess_columns, level1_hktw_ess_rows = build_first_level_summary(
+            monthly_level1,
+            source_level_column="First Level",
+            display_level_column="Level 1",
+            include_levels=["HKTW", "ESS"],
+        )
         return (
             table_columns,
             table_data,
@@ -1523,6 +3025,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             role_fig,
             pde_columns,
             pde_records,
+            drill_requester_options,
+            valid_requesters,
+            drill_mrp_options,
+            valid_mrp_indicators,
             drill_columns,
             drill_rows,
             hc_idp_columns,
@@ -1533,11 +3039,128 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             hc_idp_hs_rows,
             hc_idp_hs_iya_columns,
             hc_idp_hs_iya_rows,
-            hc_idp_quarter_iya_columns,
-            hc_idp_quarter_iya_rows,
-            level1_columns,
-            level1_rows,
+            quarter1_columns,
+            quarter1_rows,
+            quarter2_columns,
+            quarter2_rows,
+            level1_core_columns,
+            level1_core_rows,
+            level1_hktw_ess_columns,
+            level1_hktw_ess_rows,
+            td_validation_columns,
+            td_validation_rows,
+            td_validation_styles,
+            production_plant_columns,
+            production_plant_rows,
+            production_level_columns,
+            production_level_rows,
         )
+
+    @app.callback(
+        Output("td-gap-detail-title", "children"),
+        Output("td-gap-detail-table", "columns"),
+        Output("td-gap-detail-table", "data"),
+        Output("td-gap-detail-table", "style_data_conditional"),
+        Input("td-validation-table", "active_cell"),
+        Input("td-validation-table", "derived_viewport_data"),
+        Input("td-gap-level2-table", "active_cell"),
+        Input("td-gap-level2-table", "derived_viewport_data"),
+        Input("data-store", "data"),
+    )
+    def update_td_gap_details(active_cell, table_rows, level2_active_cell, level2_rows, data_store):
+        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+        title, columns, data, style_conditional = build_td_gap_detail_table(
+            active_cell,
+            table_rows or [],
+            level2_active_cell,
+            level2_rows or [],
+            td_detail_df,
+        )
+        return title, columns, data, style_conditional
+
+    @app.callback(
+        Output("td-gap-level2-title", "children"),
+        Output("td-gap-level2-table", "columns"),
+        Output("td-gap-level2-table", "data"),
+        Output("td-gap-level2-table", "style_data_conditional"),
+        Input("td-validation-table", "active_cell"),
+        Input("td-validation-table", "derived_viewport_data"),
+        Input("data-store", "data"),
+    )
+    def update_td_gap_level2_details(active_cell, table_rows, data_store):
+        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+        title, columns, data, style_conditional = build_td_gap_level2_table(active_cell, table_rows or [], td_detail_df)
+        return title, columns, data, style_conditional
+
+    @app.callback(
+        Output("td-gap-detail-download", "data"),
+        Input("td-gap-export-btn", "n_clicks"),
+        State("td-gap-detail-table", "columns"),
+        State("td-gap-detail-table", "data"),
+        State("td-gap-detail-title", "children"),
+        prevent_initial_call=True,
+    )
+    def export_td_gap_details(n_clicks, columns, rows, title):
+        if not n_clicks or not rows:
+            raise PreventUpdate
+
+        if not columns:
+            raise PreventUpdate
+
+        export_df = pd.DataFrame(rows)
+        column_ids = [str(col.get("id", "")) for col in columns if col.get("id")]
+        if not column_ids:
+            raise PreventUpdate
+
+        for col in column_ids:
+            if col not in export_df.columns:
+                export_df[col] = ""
+
+        export_df = export_df[column_ids]
+        rename_map = {str(col.get("id", "")): str(col.get("name", col.get("id", ""))) for col in columns}
+        export_df = export_df.rename(columns=rename_map)
+
+        safe_title = re.sub(r"[^0-9A-Za-z\-_]+", "_", str(title or "GAP_Details")).strip("_")
+        if not safe_title:
+            safe_title = "GAP_Details"
+        filename = f"{safe_title}.xlsx"
+
+        return dcc.send_data_frame(export_df.to_excel, filename, index=False, sheet_name="GAP Details")
+
+    @app.callback(
+        Output("td-gap-level2-download", "data"),
+        Input("td-gap-level2-export-btn", "n_clicks"),
+        State("td-gap-level2-table", "columns"),
+        State("td-gap-level2-table", "data"),
+        State("td-gap-level2-title", "children"),
+        prevent_initial_call=True,
+    )
+    def export_td_gap_level2_details(n_clicks, columns, rows, title):
+        if not n_clicks or not rows:
+            raise PreventUpdate
+
+        if not columns:
+            raise PreventUpdate
+
+        export_df = pd.DataFrame(rows)
+        column_ids = [str(col.get("id", "")) for col in columns if col.get("id") and col.get("id") != "Version Group"]
+        if not column_ids:
+            raise PreventUpdate
+
+        for col in column_ids:
+            if col not in export_df.columns:
+                export_df[col] = ""
+
+        export_df = export_df[column_ids]
+        rename_map = {str(col.get("id", "")): str(col.get("name", col.get("id", ""))) for col in columns}
+        export_df = export_df.rename(columns=rename_map)
+
+        safe_title = re.sub(r"[^0-9A-Za-z\-_]+", "_", str(title or "Level2_GAP_Details")).strip("_")
+        if not safe_title:
+            safe_title = "Level2_GAP_Details"
+        filename = f"{safe_title}.xlsx"
+
+        return dcc.send_data_frame(export_df.to_excel, filename, index=False, sheet_name="Level2 GAP")
 
     @app.callback(
         Output("drill-detail-title", "children"),
@@ -1547,8 +3170,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Input("details-version-store", "data"),
         State("role-item-mrp-summary", "data"),
         State("role-item-mrp-summary", "derived_viewport_data"),
+        State("drill-requester-filter", "value"),
     )
-    def update_drill_details(active_cell, _version_data, summary_rows, viewport_rows):
+    def update_drill_details(active_cell, _version_data, summary_rows, viewport_rows, drill_requester_value):
         details = load_request_details(cfg)
         default_columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
         if not active_cell:
@@ -1568,26 +3192,82 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             return "请选择上方 Role × Item × Project 组合", default_columns, []
 
         selected_row = working_rows[row_index]
-        role = selected_row.get("Role") or ROLE_ALL_VALUE
+        role = selected_row.get("__role_raw") or selected_row.get("Role") or ROLE_ALL_VALUE
         item_text = selected_row.get("Item Text") or ""
         mrp_indicator = selected_row.get("MRP Element Indicator") or ""
+        selected_requesters = normalize_requester_values(drill_requester_value)
 
         try:
-            columns, rows = build_modal_detail_rows(details, role, item_text, mrp_indicator)
+            columns, rows = build_modal_detail_rows(details, role, item_text, mrp_indicator, selected_requesters)
         except Exception:
             logging.exception("Failed to build drill detail rows: role=%s item=%s mrp=%s", role, item_text, mrp_indicator)
             return "加载明细失败，请稍后重试", [{"name": "错误", "id": "error"}], [{"error": "加载明细失败"}]
 
-        title_parts = [part for part in [role, item_text, mrp_indicator] if part]
+        role_title = ROLE_DISPLAY_MAP.get(str(role).strip(), str(role).strip())
+        title_parts = [part for part in [role_title, item_text, mrp_indicator] if part]
         title = " / ".join(title_parts) if title_parts else "明细列表"
         if not rows:
             return f"{title} · 暂无数据", columns or default_columns, rows
         return title, columns, rows
 
+    @app.callback(
+        Output("drill-detail-download", "data"),
+        Input("drill-detail-export-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def export_all_drill_details(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+
+        details = load_request_details(cfg)
+        if details.empty:
+            raise PreventUpdate
+
+        export_df = details.copy()
+        for field in DETAIL_VIEW_FIELDS:
+            if field not in export_df.columns:
+                export_df[field] = ""
+        export_df = export_df[DETAIL_VIEW_FIELDS]
+
+        return dcc.send_data_frame(
+            export_df.to_excel,
+            "Project_Details_All.xlsx",
+            index=False,
+            sheet_name="Project Details",
+        )
+
 
 def create_app() -> Dash:
     cfg = AppConfig.load(CONFIG_PATH)
-    app = Dash(__name__, title="MatRes Command Center", assets_folder=str(Path(__file__).parent / "assets"))
+    app = Dash(__name__, title="Supply Protection Commander", assets_folder=str(Path(__file__).parent / "assets"))
+
+    raw_allowed_subnets = os.getenv("MATRES_ALLOWED_SUBNETS", "").strip()
+    if raw_allowed_subnets:
+        allowed_subnets = []
+        for subnet_text in [part.strip() for part in raw_allowed_subnets.split(",") if part.strip()]:
+            try:
+                allowed_subnets.append(ipaddress.ip_network(subnet_text, strict=False))
+            except ValueError:
+                logging.warning("Invalid subnet ignored in MATRES_ALLOWED_SUBNETS: %s", subnet_text)
+
+        if allowed_subnets:
+            @app.server.before_request
+            def enforce_internal_access() -> None:
+                forwarded_for = str(request.headers.get("X-Forwarded-For", "")).strip()
+                source_ip = forwarded_for.split(",")[0].strip() if forwarded_for else str(request.remote_addr or "").strip()
+                try:
+                    source_addr = ipaddress.ip_address(source_ip)
+                except ValueError:
+                    abort(403)
+                    return
+
+                if not any(source_addr in subnet for subnet in allowed_subnets):
+                    abort(403)
+
+            logging.info("Internal access guard enabled with %d subnet(s).", len(allowed_subnets))
+        else:
+            logging.warning("MATRES_ALLOWED_SUBNETS was set but no valid subnet was parsed.")
+
     app.layout = build_layout(app, cfg)
     register_callbacks(app, cfg)
     return app
@@ -1597,4 +3277,13 @@ app = create_app()
 
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    debug_mode = str(os.getenv("MATRES_DEBUG", "false")).strip().lower() in {"1", "true", "yes", "on"}
+    host = str(os.getenv("MATRES_HOST", "0.0.0.0")).strip() or "0.0.0.0"
+    port_text = str(os.getenv("MATRES_PORT", "8050")).strip()
+    try:
+        port = int(port_text)
+    except ValueError:
+        port = 8050
+        logging.warning("Invalid MATRES_PORT: %s. Fallback to 8050.", port_text)
+
+    app.run(debug=debug_mode, host=host, port=port, use_reloader=False)

@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en" xmlns:mso="urn:schemas-microsoft-com:office:office" xmlns:msdt="uuid:C2F41010-65B3-11d1-A29F-00AA00C14882">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MatRes Board Logic Guide</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #e2e8f0;
+      --brand: #1d4ed8;
+      --soft: #eff6ff;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: "Segoe UI", Arial, sans-serif;
+      line-height: 1.5;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .hero {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 20px 24px;
+      margin-bottom: 16px;
+    }
+    h1, h2, h3 {
+      margin: 0 0 8px;
+      color: #0b3a9b;
+    }
+    h2 { margin-top: 18px; }
+    .sub {
+      color: var(--muted);
+      font-size: 14px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 16px 18px;
+      margin-bottom: 14px;
+    }
+    .tag {
+      display: inline-block;
+      background: var(--soft);
+      color: #1e40af;
+      border: 1px solid #bfdbfe;
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-size: 12px;
+      margin-right: 6px;
+    }
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      margin-top: 10px;
+      background: #fff;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 8px 10px;
+      vertical-align: top;
+      text-align: left;
+      font-size: 14px;
+    }
+    th {
+      background: #f1f5f9;
+      color: #0f172a;
+    }
+    code {
+      background: #f1f5f9;
+      padding: 1px 6px;
+      border-radius: 6px;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+    }
+    ul {
+      margin: 8px 0 0 18px;
+      padding: 0;
+    }
+    li { margin: 5px 0; }
+  </style>
+
+<!--[if gte mso 9]><xml>
+<mso:CustomDocumentProperties>
+<mso:i0f84bba906045b4af568ee102a52dcb msdt:dt="string">Daily Work Documents [Standard]|c1df7c93-bf29-4bb4-a9f3-5b7aacc5e62b</mso:i0f84bba906045b4af568ee102a52dcb>
+<mso:TaxCatchAll msdt:dt="string">7;#Daily Work Documents [Standard]</mso:TaxCatchAll>
+</mso:CustomDocumentProperties>
+</xml><![endif]-->
+</head>
+<body>
+  <div class="container">
+    <div class="hero">
+      <h1>MatRes Dashboard — Board Logic Guide</h1>
+      <div class="sub">Purpose: one-page handover document for new users. Covers page functions, source data, and calculation logic.</div>
+      <div style="margin-top:10px">
+        <span class="tag">Updated: 2026-03-16</span>
+        <span class="tag">Main App: dashboards/matres_app.py</span>
+        <span class="tag">Pipeline: scripts/matres_pipeline.py</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>1) End-to-End Data Flow</h2>
+      <ul>
+        <li>Raw files are read by <code>scripts/matres_pipeline.py</code>.</li>
+        <li>Pipeline writes standardized outputs to <code>data/processed/</code>.</li>
+        <li>Dashboard <code>dashboards/matres_app.py</code> loads processed CSVs through <code>load_data_bundle()</code>.</li>
+        <li>UI refresh interval is 15 minutes and supports manual interaction-level drilldown.</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>2) Processed Data Files Used by Dashboard</h2>
+      <table>
+        <thead>
+          <tr><th>File</th><th>Main Purpose</th><th>Used In</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>monthly_msu_by_item_text.csv</code></td><td>Supply protection by Item Text</td><td>Supply Protection, Demand Assumption</td></tr>
+          <tr><td><code>monthly_msu_by_requester_item.csv</code></td><td>Requester / role monthly trend</td><td>Supply Protection</td></tr>
+          <tr><td><code>monthly_msu_by_level1.csv</code></td><td>Level1 mapping (PP/Base/HKTW/ESS)</td><td>Demand Assumption, HS logic</td></tr>
+          <tr><td><code>pde_alerts.csv</code></td><td>Near-term PDE alerts</td><td>Supply Protection</td></tr>
+          <tr><td><code>matres_request_details.csv</code></td><td>Request-level detail records</td><td>Project Details</td></tr>
+          <tr><td><code>hc_idp_monthly_summary.csv</code></td><td>LBE baseline by month</td><td>Demand Assumption</td></tr>
+          <tr><td><code>td_version_monthly_comparison.csv</code></td><td>TD monthly version comparison</td><td>Demand Data</td></tr>
+          <tr><td><code>td_version_gap_details.csv</code></td><td>GAP drilldown details</td><td>Demand Data</td></tr>
+          <tr><td><code>production_data_summary.csv</code></td><td>Production summary by plant</td><td>Production Data</td></tr>
+          <tr><td><code>production_data_summary_by_level.csv</code></td><td>Production by plant/level1/level2</td><td>Production Data</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>3) Page-by-Page Functional Scope</h2>
+
+      <h3>Demand Assumption</h3>
+      <ul>
+        <li>Tables: <code>Demand LBE</code>, <code>Demand LBE IYA</code>, <code>Demand HS</code>, <code>Demand HS IYA</code>.</li>
+        <li>Supply Protection split tables: <code>(PP + Base)</code> and <code>(HKTW + ESS)</code>.</li>
+        <li>Quarter view split into current quarter and next quarter IYA tables.</li>
+      </ul>
+
+      <h3>Supply Protection</h3>
+      <ul>
+        <li>KPI cards: total protection MSU, item count, PDE open alerts (coming 7 days).</li>
+        <li>Role trend chart and role-item matrix summary.</li>
+        <li>Monthly summary table and Past Due Alerts table.</li>
+      </ul>
+
+      <h3>Project Details</h3>
+      <ul>
+        <li>Role × Item × Project summary table.</li>
+        <li>Searchable multi-select filters: <code>Requester Email</code>, <code>MRP Element Indicator</code>.</li>
+        <li>Detail drilldown and full detail export.</li>
+      </ul>
+
+      <h3>Demand Data</h3>
+      <ul>
+        <li>Main table: TD Version Monthly Comparison.</li>
+        <li>Click GAP row to drive two detail tables: Level2 gap and item-level gap difference.</li>
+        <li>Both detail sections support export to Excel.</li>
+      </ul>
+
+      <h3>Production Data</h3>
+      <ul>
+        <li>Two tables: <code>By Plant</code> and <code>By Plant / Level1 / Level2</code>.</li>
+        <li>Current month split: <code>MTD</code>, <code>Left Production</code>, <code>Current Month</code>.</li>
+        <li>Total rows highlighted (HP/TC/XQ totals and <code>GC Total</code>).</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>4) Core Calculation Logic</h2>
+      <table>
+        <thead>
+          <tr><th>Metric</th><th>Logic</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Demand LBE</td>
+            <td>Monthly LBE values from HC IDP monthly summary; current month can use Weekly(TP) override logic from pipeline stage.</td>
+          </tr>
+          <tr>
+            <td>Demand HS</td>
+            <td><code>Demand HS = Demand LBE + Supply Protection</code>, with supply split mapped to Base and Promotion buckets.</td>
+          </tr>
+          <tr>
+            <td>IYA (monthly)</td>
+            <td><code>IYA% = current value / last-year same-period baseline × 100</code>; missing denominator shows placeholder.</td>
+          </tr>
+          <tr>
+            <td>Quarter IYA</td>
+            <td>Quarter sums for LBE and HS; quarter IYA computed against same-quarter historical baseline.</td>
+          </tr>
+          <tr>
+            <td>Production tables</td>
+            <td>Current month is split into MTD / Left / Current Month Total; monthly columns kept in <code>YYYY-MM</code> sequence with subtotal rows.</td>
+          </tr>
+          <tr>
+            <td>Supply Protection total</td>
+            <td>For weekly email and summary usage, total can be aggregated across all months (FG + Material groups).</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>5) Operation Notes</h2>
+      <ul>
+        <li>Run pipeline first, then launch dashboard.</li>
+        <li>Keep config local and environment-specific (<code>config/config.json</code> should not be treated as shared public secret).</li>
+        <li>Recommended for release: use Git branch/tag strategy and deploy production machine from tagged version only.</li>
+      </ul>
+    </div>
+  </div>
+</body>
+</html>

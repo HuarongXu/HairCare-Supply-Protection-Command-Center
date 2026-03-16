@@ -8,3 +8,21 @@ __pycache__/
 ~$*
 .DS_Store
 Thumbs.db
+
+# Local config
+config/config.json
+
+# Raw data and historical backups (local only)
+0.Data Base/
+Tool Backup/
+One Click Start Up/
+*.xlsm
+*.xlsx
+
+# Generated or local runtime data
+data/history/
+data/processed/
+
+# Legacy local dashboard snapshots
+dashboards/matres_app V*.py
+dashboards/matres_app copy.py
