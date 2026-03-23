@@ -6,6 +6,7 @@ import ipaddress
 import logging
 import os
 import re
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -982,7 +983,12 @@ def build_production_data_table_no_level2(df: pd.DataFrame) -> Tuple[List[Dict],
     return columns, result_rows
 
 
-def build_production_data_table_by_plant(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+def build_production_data_table_by_plant(
+    df: pd.DataFrame,
+    plant_order: Optional[List[str]] = None,
+    include_segment_totals: bool = True,
+    segment_totals_after: Optional[Dict[str, Tuple[str, List[str]]]] = None,
+) -> Tuple[List[Dict], List[Dict]]:
     base_cols = ["Plant", "MTD", "Left Production", "Current Month"]
     if df.empty:
         columns = [{"name": col, "id": col} for col in base_cols]
@@ -1027,6 +1033,13 @@ def build_production_data_table_by_plant(df: pd.DataFrame) -> Tuple[List[Dict], 
     total_numeric_cols = ["MTD", "Left Production", "Current Month", *display_month_cols]
     grouped = grouped[ordered_cols].copy()
 
+    if plant_order:
+        allowed_plants = {str(p).strip() for p in plant_order}
+        grouped = grouped[grouped["Plant"].astype(str).str.strip().isin(allowed_plants)].copy()
+        if grouped.empty:
+            columns = [{"name": col, "id": col} for col in ordered_cols]
+            return columns, []
+
     def sum_for_plants(plants: List[str]) -> pd.Series:
         subset = grouped[grouped["Plant"].isin(plants)]
         if subset.empty:
@@ -1042,15 +1055,37 @@ def build_production_data_table_by_plant(df: pd.DataFrame) -> Tuple[List[Dict], 
             row[col] = float(summed.get(col, 0.0))
         ordered_rows.append(row)
 
-    append_row("0386", ["0386"])
-    append_row("C810", ["C810"])
-    append_row("HP Total", ["0386", "C810"])
-    append_row("A868", ["A868"])
-    append_row("A673", ["A673"])
-    append_row("TC Total", ["A868", "A673"])
-    append_row("1864", ["1864"])
-    append_row("D352", ["D352"])
-    append_row("XQ Total", ["1864", "D352"])
+    if plant_order:
+        for plant in plant_order:
+            append_row(str(plant).strip(), [str(plant).strip()])
+    else:
+        append_row("0386", ["0386"])
+        append_row("C810", ["C810"])
+        append_row("A868", ["A868"])
+        append_row("A673", ["A673"])
+        append_row("1864", ["1864"])
+        append_row("D352", ["D352"])
+
+    if include_segment_totals:
+        if plant_order and segment_totals_after:
+            inserted_labels = set()
+            reordered_rows: List[Dict[str, Any]] = []
+            for plant in plant_order:
+                plant_label = str(plant).strip()
+                matched_rows = [row for row in ordered_rows if str(row.get("Plant", "")).strip() == plant_label]
+                reordered_rows.extend(matched_rows)
+                total_spec = segment_totals_after.get(plant_label)
+                if total_spec:
+                    total_label, total_plants = total_spec
+                    if total_label not in inserted_labels:
+                        append_row(total_label, total_plants)
+                        inserted_labels.add(total_label)
+                        reordered_rows.append(ordered_rows[-1])
+            ordered_rows = reordered_rows
+        else:
+            append_row("HP Total", ["0386", "C810"])
+            append_row("TC Total", ["A868", "A673"])
+            append_row("XQ Total", ["1864", "D352"])
     append_row("GC Total", grouped["Plant"].astype(str).str.strip().tolist())
 
     grouped = pd.DataFrame(ordered_rows)
@@ -1062,7 +1097,12 @@ def build_production_data_table_by_plant(df: pd.DataFrame) -> Tuple[List[Dict], 
     return columns, grouped[ordered_cols].to_dict("records")
 
 
-def build_production_data_table_by_plant_level(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
+def build_production_data_table_by_plant_level(
+    df: pd.DataFrame,
+    plant_order: Optional[List[str]] = None,
+    include_segment_totals: bool = True,
+    segment_totals_after: Optional[Dict[str, Tuple[str, List[str]]]] = None,
+) -> Tuple[List[Dict], List[Dict]]:
     base_cols = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month"]
     if df.empty:
         columns = [{"name": col, "id": col} for col in base_cols]
@@ -1100,6 +1140,13 @@ def build_production_data_table_by_plant_level(df: pd.DataFrame) -> Tuple[List[D
         grouped = grouped[grouped[data_numeric_cols].abs().sum(axis=1) > 0].copy()
 
     grouped = grouped.sort_values(["Plant", "Level1", "Level2"], ascending=[True, True, True]).reset_index(drop=True)
+
+    if plant_order:
+        allowed_plants = {str(p).strip() for p in plant_order}
+        grouped = grouped[grouped["Plant"].astype(str).str.strip().isin(allowed_plants)].copy()
+        if grouped.empty:
+            columns = [{"name": col, "id": col} for col in ordered_cols]
+            return columns, []
 
     result_rows: List[Dict[str, Any]] = []
 
@@ -1143,18 +1190,29 @@ def build_production_data_table_by_plant_level(df: pd.DataFrame) -> Tuple[List[D
         }
         result_rows.append(record)
 
-    append_plant_detail("0386")
-    append_plant_detail("C810")
-    ensure_empty_plant_row("C810")
-    append_group_total("HP Total", ["0386", "C810"])
+    if plant_order:
+        for plant in plant_order:
+            plant_key = str(plant).strip()
+            append_plant_detail(plant_key)
+            ensure_empty_plant_row(plant_key)
+            if include_segment_totals and segment_totals_after:
+                total_spec = segment_totals_after.get(plant_key)
+                if total_spec:
+                    total_label, total_plants = total_spec
+                    append_group_total(total_label, total_plants)
+    else:
+        append_plant_detail("0386")
+        append_plant_detail("C810")
+        ensure_empty_plant_row("C810")
+        append_plant_detail("A868")
+        append_plant_detail("A673")
+        append_plant_detail("1864")
+        append_plant_detail("D352")
 
-    append_plant_detail("A868")
-    append_plant_detail("A673")
-    append_group_total("TC Total", ["A868", "A673"])
-
-    append_plant_detail("1864")
-    append_plant_detail("D352")
-    append_group_total("XQ Total", ["1864", "D352"])
+    if include_segment_totals and not (plant_order and segment_totals_after):
+        append_group_total("HP Total", ["0386", "C810"])
+        append_group_total("TC Total", ["A868", "A673"])
+        append_group_total("XQ Total", ["1864", "D352"])
 
     all_plants = grouped["Plant"].astype(str).str.strip().unique().tolist()
     append_group_total("GC Total", all_plants)
@@ -1429,6 +1487,197 @@ def split_quarter_iya_tables(
         (quarter_title(first_quarter_cols, "Demand IYA by quarter - Quarter 1"), q1_columns, q1_rows),
         (quarter_title(second_quarter_cols, "Demand IYA by quarter - Quarter 2"), q2_columns, q2_rows),
     )
+
+
+def _snapshot_to_dataframe(columns: List[Dict[str, Any]], rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    ordered_ids = [str(col.get("id", "")).strip() for col in (columns or []) if str(col.get("id", "")).strip()]
+    if not rows:
+        return pd.DataFrame(columns=ordered_ids)
+
+    data = pd.DataFrame(rows)
+    if ordered_ids:
+        for col in ordered_ids:
+            if col not in data.columns:
+                data[col] = ""
+        return data[ordered_ids]
+    return data
+
+
+def _snapshot_clean_sheet_name(name: str) -> str:
+    normalized = re.sub(r"[\\/*?:\[\]]", "_", str(name)).strip()
+    if not normalized:
+        normalized = "Sheet"
+    return normalized[:31]
+
+
+def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
+    data_bundle = load_data_bundle(cfg)
+    monthly_requester = pd.DataFrame(data_bundle.get("monthly_requester", []))
+    monthly_level1 = pd.DataFrame(data_bundle.get("monthly_level1", []))
+    hc_idp_monthly = pd.DataFrame(data_bundle.get("hc_idp_monthly", []))
+    production_data_df = pd.DataFrame(data_bundle.get("production_data", []))
+    production_data_by_level_df = pd.DataFrame(data_bundle.get("production_data_by_level", []))
+    td_validation_detail = pd.DataFrame(data_bundle.get("td_validation_detail", []))
+    historical_shipment = pd.DataFrame(data_bundle.get("historical_shipment", []))
+    pde_alerts = pd.DataFrame(data_bundle.get("pde_alerts", []))
+    request_details = load_request_details(cfg)
+
+    page_sheets: Dict[str, List[Tuple[str, pd.DataFrame]]] = {
+        "Demand Assumption": [],
+        "Supply Protection": [],
+        "Project Details": [],
+        "Demand Data": [],
+        "Production Data": [],
+        "Raw Data": [],
+    }
+
+    role_matrix_columns, role_matrix_data = build_monthly_matrix(monthly_requester, ROLE_ALL_VALUE)
+    page_sheets["Supply Protection"].append(("01 Role x Item", _snapshot_to_dataframe(role_matrix_columns, role_matrix_data)))
+
+    summary_columns, summary_data = build_item_summary(monthly_requester, ROLE_ALL_VALUE)
+    page_sheets["Supply Protection"].append(("02 Monthly Summary", _snapshot_to_dataframe(summary_columns, summary_data)))
+
+    pde_columns, pde_data = build_pde_matrix(pde_alerts)
+    page_sheets["Supply Protection"].append(("03 Past Due Alerts", _snapshot_to_dataframe(pde_columns, pde_data)))
+
+    drill_columns, drill_rows = build_role_item_project_summary(request_details, ROLE_ALL_VALUE, [], [])
+    page_sheets["Project Details"].append(("01 Role x Item x Project", _snapshot_to_dataframe(drill_columns, drill_rows)))
+
+    hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
+    page_sheets["Demand Assumption"].append(("01 Demand LBE", _snapshot_to_dataframe(hc_idp_columns, hc_idp_rows)))
+
+    hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
+    hc_idp_hs_columns, hc_idp_hs_rows = build_hc_idp_monthly_table(hc_idp_hs_df)
+    page_sheets["Demand Assumption"].append(("02 Demand HS", _snapshot_to_dataframe(hc_idp_hs_columns, hc_idp_hs_rows)))
+
+    hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
+    page_sheets["Demand Assumption"].append(("03 Demand LBE IYA", _snapshot_to_dataframe(hc_idp_iya_columns, hc_idp_iya_rows)))
+
+    hc_idp_hs_iya_columns, hc_idp_hs_iya_rows = build_demand_iya_table(hc_idp_hs_df, historical_shipment)
+    page_sheets["Demand Assumption"].append(("04 Demand HS IYA", _snapshot_to_dataframe(hc_idp_hs_iya_columns, hc_idp_hs_iya_rows)))
+
+    quarter_columns, quarter_rows = build_demand_iya_by_quarter_table(hc_idp_monthly, hc_idp_hs_df, historical_shipment)
+    (_, q1_columns, q1_rows), (_, q2_columns, q2_rows) = split_quarter_iya_tables(quarter_columns, quarter_rows)
+    page_sheets["Demand Assumption"].append(("05 Demand IYA Quarter 1", _snapshot_to_dataframe(q1_columns, q1_rows)))
+    page_sheets["Demand Assumption"].append(("06 Demand IYA Quarter 2", _snapshot_to_dataframe(q2_columns, q2_rows)))
+
+    level1_core_columns, level1_core_rows = build_first_level_summary(
+        monthly_level1,
+        source_level_column="First Level",
+        display_level_column="Level 1",
+        include_levels=["Base", "PP"],
+    )
+    page_sheets["Demand Assumption"].append(("07 Supply Protection PP+Base", _snapshot_to_dataframe(level1_core_columns, level1_core_rows)))
+
+    level1_hktw_ess_columns, level1_hktw_ess_rows = build_first_level_summary(
+        monthly_level1,
+        source_level_column="First Level",
+        display_level_column="Level 1",
+        include_levels=["HKTW", "ESS"],
+    )
+    page_sheets["Demand Assumption"].append(("08 Supply Protection HKTW+ESS", _snapshot_to_dataframe(level1_hktw_ess_columns, level1_hktw_ess_rows)))
+
+    td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
+    page_sheets["Demand Data"].append(("01 TD Version Monthly Comparison", _snapshot_to_dataframe(td_validation_columns, td_validation_rows)))
+
+    production_group_1 = ["0386", "1864", "A868"]
+    production_group_2 = ["C810", "D352", "A673"]
+    production_group_1_totals_after = {
+        "0386": ("HP Total", ["0386", "C810"]),
+        "1864": ("XQ Total", ["1864", "D352"]),
+        "A868": ("TC Total", ["A868", "A673"]),
+    }
+    production_group_2_level = ["C810", "D352", "A673"]
+    production_group_2_totals_after = {
+        "C810": ("HP Total", ["0386", "C810"]),
+        "D352": ("XQ Total", ["1864", "D352"]),
+        "A673": ("TC Total", ["A868", "A673"]),
+    }
+
+    p1_columns, p1_rows = build_production_data_table_by_plant(
+        production_data_df,
+        plant_order=production_group_1,
+        include_segment_totals=False,
+    )
+    page_sheets["Production Data"].append(("01 Table1 By Plant", _snapshot_to_dataframe(p1_columns, p1_rows)))
+
+    p2_columns, p2_rows = build_production_data_table_by_plant_level(
+        production_data_by_level_df,
+        plant_order=production_group_1,
+        include_segment_totals=True,
+        segment_totals_after=production_group_1_totals_after,
+    )
+    page_sheets["Production Data"].append(("02 Table2 Plant-Level1-Level2", _snapshot_to_dataframe(p2_columns, p2_rows)))
+
+    p3_columns, p3_rows = build_production_data_table_by_plant(
+        production_data_df,
+        plant_order=production_group_2,
+        include_segment_totals=False,
+    )
+    page_sheets["Production Data"].append(("03 Table3 By Plant", _snapshot_to_dataframe(p3_columns, p3_rows)))
+
+    p4_columns, p4_rows = build_production_data_table_by_plant_level(
+        production_data_by_level_df,
+        plant_order=production_group_2_level,
+        include_segment_totals=True,
+        segment_totals_after=production_group_2_totals_after,
+    )
+    page_sheets["Production Data"].append(("04 Table4 Plant-Level1-Level2", _snapshot_to_dataframe(p4_columns, p4_rows)))
+
+    page_sheets["Raw Data"].extend(
+        [
+            ("01 monthly_item", pd.DataFrame(data_bundle.get("monthly_item", []))),
+            ("02 monthly_requester", monthly_requester),
+            ("03 monthly_level1", monthly_level1),
+            ("04 hc_idp_monthly", hc_idp_monthly),
+            ("05 production_data", production_data_df),
+            ("06 production_data_by_level", production_data_by_level_df),
+            ("07 td_validation_detail", td_validation_detail),
+            ("08 historical_shipment", historical_shipment),
+            ("09 pde_alerts", pde_alerts),
+            ("10 request_details", request_details),
+        ]
+    )
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = cfg.processed_dir.parent / "history" / "dashboard_snapshots" / f"snapshot_{timestamp}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    excel_path = out_dir / f"dashboard_snapshot_{timestamp}.xlsx"
+    page_prefix = {
+        "Demand Assumption": "DMD",
+        "Supply Protection": "SP",
+        "Project Details": "PRJ",
+        "Demand Data": "VAL",
+        "Production Data": "PRD",
+        "Raw Data": "RAW",
+    }
+    with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+        used_names = set()
+        for page_name, sheet_items in page_sheets.items():
+            prefix = page_prefix.get(page_name, "PG")
+            for index, (sheet_name, frame) in enumerate(sheet_items, start=1):
+                safe_name = _snapshot_clean_sheet_name(f"{prefix}{index:02d}_{sheet_name}")
+                candidate = safe_name
+                seq = 1
+                while candidate in used_names:
+                    suffix = f"_{seq}"
+                    candidate = f"{safe_name[:31-len(suffix)]}{suffix}"
+                    seq += 1
+                used_names.add(candidate)
+                frame.to_excel(writer, index=False, sheet_name=candidate)
+
+    csv_dir = out_dir / "csv"
+    csv_dir.mkdir(parents=True, exist_ok=True)
+    for page_name, sheet_items in page_sheets.items():
+        page_dir = csv_dir / page_name
+        page_dir.mkdir(parents=True, exist_ok=True)
+        for index, (sheet_name, frame) in enumerate(sheet_items, start=1):
+            csv_name = _snapshot_clean_sheet_name(f"{index:02d}_{sheet_name}")
+            frame.to_csv(page_dir / f"{csv_name}.csv", index=False, encoding="utf-8-sig")
+
+    total_tables = sum(len(items) for items in page_sheets.values())
+    return out_dir, excel_path, total_tables
 
 
 def build_td_validation_table(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
@@ -2245,8 +2494,39 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         hc_idp_quarter_iya_columns,
         hc_idp_quarter_iya_rows,
     )
-    production_plant_columns, production_plant_rows = build_production_data_table_by_plant(production_data_df)
-    production_level_columns, production_level_rows = build_production_data_table_by_plant_level(production_data_by_level_df)
+    production_group_1 = ["0386", "1864", "A868"]
+    production_group_2 = ["C810", "D352", "A673"]
+    production_group_1_totals_after = {
+        "0386": ("HP Total", ["0386", "C810"]),
+        "1864": ("XQ Total", ["1864", "D352"]),
+        "A868": ("TC Total", ["A868", "A673"]),
+    }
+    production_group_2_level = ["C810", "D352", "A673"]
+    production_group_2_totals_after = {
+        "C810": ("HP Total", ["0386", "C810"]),
+        "D352": ("XQ Total", ["1864", "D352"]),
+        "A673": ("TC Total", ["A868", "A673"]),
+    }
+    production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
+        production_data_df,
+        plant_order=production_group_1,
+        include_segment_totals=False,
+    )
+    production_level_columns_1, production_level_rows_1 = build_production_data_table_by_plant_level(
+        production_data_by_level_df,
+        plant_order=production_group_1,
+    )
+    production_plant_columns_2, production_plant_rows_2 = build_production_data_table_by_plant(
+        production_data_df,
+        plant_order=production_group_2,
+        include_segment_totals=False,
+    )
+    production_level_columns_2, production_level_rows_2 = build_production_data_table_by_plant_level(
+        production_data_by_level_df,
+        plant_order=production_group_2_level,
+        include_segment_totals=True,
+        segment_totals_after=production_group_2_totals_after,
+    )
     td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
     td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
 
@@ -2798,11 +3078,11 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 children=[
                     html.H3("Production Data"),
                     html.P("说明：当前数据不可读，验证中。"),
-                    html.H4("Production Data (By Plant)"),
+                    html.H4("Production Data (By Plant) - Table 1"),
                     DataTable(
-                        id="production-data-plant-table",
-                        columns=production_plant_columns,
-                        data=production_plant_rows,
+                        id="production-data-plant-table-1",
+                        columns=production_plant_columns_1,
+                        data=production_plant_rows_1,
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=[
@@ -2828,11 +3108,73 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         sort_action="native",
                         filter_action="none",
                     ),
-                    html.H4("Production Data (By Plant / Level1 / Level2)", style={"marginTop": "18px"}),
+                    html.H4("Production Data (By Plant / Level1 / Level2) - Table 2", style={"marginTop": "18px"}),
                     DataTable(
-                        id="production-data-level-table",
-                        columns=production_level_columns,
-                        data=production_level_rows,
+                        id="production-data-level-table-2",
+                        columns=production_level_columns_1,
+                        data=production_level_rows_1,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level1"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level2"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
+                    ),
+                    html.H4("Production Data (By Plant) - Table 3", style={"marginTop": "18px"}),
+                    DataTable(
+                        id="production-data-plant-table-3",
+                        columns=production_plant_columns_2,
+                        data=production_plant_rows_2,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
+                    ),
+                    html.H4("Production Data (By Plant / Level1 / Level2) - Table 4", style={"marginTop": "18px"}),
+                    DataTable(
+                        id="production-data-level-table-4",
+                        columns=production_level_columns_2,
+                        data=production_level_rows_2,
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=[
@@ -2875,8 +3217,26 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 className="hero",
                 children=[
                     html.Div(
-                        [html.H1("Hair Care Supply Protection Command Center"), html.P("(MVP)")]
-                    )
+                        [
+                            html.H1("Hair Care Supply Protection Command Center"),
+                            html.P("(MVP)"),
+                        ]
+                    ),
+                    html.Div(
+                        style={
+                            "display": "flex",
+                            "flexDirection": "column",
+                            "alignItems": "flex-end",
+                            "gap": "8px",
+                            "minWidth": "260px",
+                            "marginLeft": "auto",
+                        },
+                        children=[
+                            html.Button("Backup Snapshot", id="backup-snapshot-btn", n_clicks=0),
+                            html.Span("", id="backup-snapshot-status", style={"fontSize": "13px", "color": "#334155", "textAlign": "right"}),
+                            dcc.Download(id="backup-snapshot-download"),
+                        ],
+                    ),
                 ],
             ),
             dcc.Tabs(
@@ -2943,10 +3303,14 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("td-validation-table", "columns"),
         Output("td-validation-table", "data"),
         Output("td-validation-table", "style_data_conditional"),
-        Output("production-data-plant-table", "columns"),
-        Output("production-data-plant-table", "data"),
-        Output("production-data-level-table", "columns"),
-        Output("production-data-level-table", "data"),
+        Output("production-data-plant-table-1", "columns"),
+        Output("production-data-plant-table-1", "data"),
+        Output("production-data-level-table-2", "columns"),
+        Output("production-data-level-table-2", "data"),
+        Output("production-data-plant-table-3", "columns"),
+        Output("production-data-plant-table-3", "data"),
+        Output("production-data-level-table-4", "columns"),
+        Output("production-data-level-table-4", "data"),
         Input("data-store", "data"),
         Input("role-filter", "value"),
         Input("drill-role-filter", "value"),
@@ -3003,8 +3367,41 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         )
         td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
         td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
-        production_plant_columns, production_plant_rows = build_production_data_table_by_plant(production_data_df)
-        production_level_columns, production_level_rows = build_production_data_table_by_plant_level(production_data_by_level_df)
+        production_group_1 = ["0386", "1864", "A868"]
+        production_group_2 = ["C810", "D352", "A673"]
+        production_group_1_totals_after = {
+            "0386": ("HP Total", ["0386", "C810"]),
+            "1864": ("XQ Total", ["1864", "D352"]),
+            "A868": ("TC Total", ["A868", "A673"]),
+        }
+        production_group_2_level = ["C810", "D352", "A673"]
+        production_group_2_totals_after = {
+            "C810": ("HP Total", ["0386", "C810"]),
+            "D352": ("XQ Total", ["1864", "D352"]),
+            "A673": ("TC Total", ["A868", "A673"]),
+        }
+        production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
+            production_data_df,
+            plant_order=production_group_1,
+            include_segment_totals=False,
+        )
+        production_level_columns_1, production_level_rows_1 = build_production_data_table_by_plant_level(
+            production_data_by_level_df,
+            plant_order=production_group_1,
+            include_segment_totals=True,
+            segment_totals_after=production_group_1_totals_after,
+        )
+        production_plant_columns_2, production_plant_rows_2 = build_production_data_table_by_plant(
+            production_data_df,
+            plant_order=production_group_2,
+            include_segment_totals=False,
+        )
+        production_level_columns_2, production_level_rows_2 = build_production_data_table_by_plant_level(
+            production_data_by_level_df,
+            plant_order=production_group_2_level,
+            include_segment_totals=True,
+            segment_totals_after=production_group_2_totals_after,
+        )
         level1_core_columns, level1_core_rows = build_first_level_summary(
             monthly_level1,
             source_level_column="First Level",
@@ -3050,10 +3447,14 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             td_validation_columns,
             td_validation_rows,
             td_validation_styles,
-            production_plant_columns,
-            production_plant_rows,
-            production_level_columns,
-            production_level_rows,
+            production_plant_columns_1,
+            production_plant_rows_1,
+            production_level_columns_1,
+            production_level_rows_1,
+            production_plant_columns_2,
+            production_plant_rows_2,
+            production_level_columns_2,
+            production_level_rows_2,
         )
 
     @app.callback(
@@ -3235,6 +3636,24 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             index=False,
             sheet_name="Project Details",
         )
+
+    @app.callback(
+        Output("backup-snapshot-download", "data"),
+        Output("backup-snapshot-status", "children"),
+        Input("backup-snapshot-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def backup_snapshot(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+
+        try:
+            snapshot_dir, excel_file, exported_count = create_dashboard_snapshot(cfg)
+            status_text = f"Backup completed: {snapshot_dir.name} ({exported_count} tables)"
+            return dcc.send_file(str(excel_file)), status_text
+        except Exception:
+            logging.exception("Failed to create dashboard snapshot")
+            return dash.no_update, "Backup failed, please check server logs."
 
 
 def create_app() -> Dash:

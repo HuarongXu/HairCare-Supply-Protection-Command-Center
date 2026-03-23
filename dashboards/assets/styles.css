@@ -23,8 +23,8 @@ body {
 
 .hero {
   display: flex;
-  align-items: center;
-  justify-content: flex-start;
+  align-items: flex-start;
+  justify-content: space-between;
   text-align: left;
   padding: 26px 30px;
   border-radius: 24px;
