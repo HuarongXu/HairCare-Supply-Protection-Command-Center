@@ -275,6 +275,81 @@ def read_second_level_mapping(cfg: PipelineConfig) -> pd.DataFrame:
     return result[["material_key", "Level2"]]
 
 
+def read_xqtc_9su_mapping(root: Path) -> pd.DataFrame:
+    candidates = [
+        p for p in root.glob("Parameter*.xls*")
+        if p.is_file() and not p.name.startswith("~$")
+    ]
+    if not candidates:
+        return pd.DataFrame(columns=["material_key", "su9", "is_bottle_line"])
+
+    parameter_path = max(candidates, key=lambda p: p.stat().st_mtime)
+    try:
+        raw = pd.read_excel(parameter_path)
+    except Exception:
+        logging.exception("Failed to read Parameter mapping from %s", parameter_path)
+        return pd.DataFrame(columns=["material_key", "su9", "is_bottle_line"])
+
+    if raw.empty:
+        return pd.DataFrame(columns=["material_key", "su9", "is_bottle_line"])
+
+    normalized_map = {str(col).strip().lower(): col for col in raw.columns}
+
+    code_col = None
+    for key in ["code", "material", "material code", "materialcode"]:
+        if key in normalized_map:
+            code_col = normalized_map[key]
+            break
+    if code_col is None:
+        for col in raw.columns:
+            key = str(col).strip().lower()
+            if "code" in key or "material" in key:
+                code_col = col
+                break
+
+    su9_col = None
+    for col in raw.columns:
+        key = str(col).strip().lower()
+        if "9" in key and "su" in key:
+            su9_col = col
+            break
+
+    technology_col = None
+    for key in ["technology", "tech", "packing type", "packingtype", "type"]:
+        if key in normalized_map:
+            technology_col = normalized_map[key]
+            break
+    if technology_col is None:
+        for col in raw.columns:
+            key = str(col).strip().lower()
+            if "technology" in key or "tech" in key or "packing" in key or key == "type":
+                technology_col = col
+                break
+
+    if code_col is None or su9_col is None or technology_col is None:
+        logging.warning("Parameter file missing Code/9字头SU/Technology columns: %s", parameter_path)
+        return pd.DataFrame(columns=["material_key", "su9", "is_bottle_line"])
+
+    mapping = raw[[code_col, su9_col, technology_col]].copy()
+    mapping.columns = ["Code", "SU9", "Technology"]
+    mapping["material_key"] = mapping["Code"].apply(normalize_material_key)
+    mapping["su9"] = pd.to_numeric(mapping["SU9"], errors="coerce")
+    tech_normalized = mapping["Technology"].fillna("").astype(str).str.strip().str.lower()
+    mapping["is_bottle_line"] = tech_normalized.str.replace("-", " ", regex=False).str.replace("_", " ", regex=False).str.replace("  ", " ", regex=False).eq("bottle line")
+    mapping = mapping[mapping["material_key"].astype(bool)].copy()
+
+    grouped = (
+        mapping.groupby("material_key", dropna=False)
+        .agg(
+            su9=("su9", lambda s: pd.to_numeric(s, errors="coerce").dropna().iloc[0] if pd.to_numeric(s, errors="coerce").dropna().size > 0 else pd.NA),
+            is_bottle_line=("is_bottle_line", "max"),
+        )
+        .reset_index()
+    )
+    grouped["is_bottle_line"] = grouped["is_bottle_line"].fillna(False).astype(bool)
+    return grouped[["material_key", "su9", "is_bottle_line"]]
+
+
 def summarize_monthly_by_first_level(df: pd.DataFrame, mapping: pd.DataFrame, cfg: PipelineConfig) -> pd.DataFrame:
     level_col = cfg.level1_first_level_column
     if (
@@ -681,6 +756,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
 
     production_vol_frames: list[pd.DataFrame] = []
     month_labels: set[str] = set()
+    xqtc_9su_mapping = read_xqtc_9su_mapping(root)
 
     for report_path in production_vol_reports:
         try:
@@ -694,9 +770,10 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
 
         category_col = pick_column(raw, ["categories / members"], ["categories"])
         plant_col = pick_column(raw, ["plant"], ["plant"])
+        material_col = pick_column(raw, ["material"], ["material"])
         prev_perd_col = pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
         d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
-        if category_col is None or plant_col is None or prev_perd_col is None:
+        if category_col is None or plant_col is None or material_col is None or prev_perd_col is None:
             logging.warning("Production Vol report missing Category/Plant columns: %s", report_path)
             continue
 
@@ -716,13 +793,14 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
             logging.warning("Production Vol report has no monthly columns: %s", report_path)
             continue
 
-        select_cols = [category_col, plant_col, *month_col_map.keys()]
+        select_cols = [category_col, plant_col, material_col, *month_col_map.keys()]
         if d_filter_col is not None and d_filter_col not in select_cols:
             select_cols.append(d_filter_col)
         working = raw[select_cols].copy()
         rename_base = {
             category_col: "Category",
             plant_col: "Plant",
+            material_col: "Material",
         }
         if d_filter_col is not None and d_filter_col in working.columns and d_filter_col != plant_col:
             rename_base[d_filter_col] = "_D_FILTER"
@@ -730,12 +808,14 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
 
         working["Category"] = working["Category"].fillna("").astype(str).str.strip()
         working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        working["Material"] = working["Material"].fillna("").astype(str).str.strip()
         if "_D_FILTER" in working.columns:
             working["_D_FILTER"] = working["_D_FILTER"].fillna("").astype(str).str.strip()
 
         working = working[
             working["Category"].str.replace(" ", "", regex=False).str.lower().eq("2.0production/receipts")
             & working["Plant"].ne("")
+            & working["Material"].ne("")
             & (working["_D_FILTER"].ne("") if "_D_FILTER" in working.columns else True)
         ].copy()
         if working.empty:
@@ -745,9 +825,49 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
         working = working.rename(columns=rename_map)
 
         normalized_month_cols = sorted({label for label in rename_map.values()})
-        scale_factor = 1000.0 if "xqtc" in report_path.name.lower() else 1.0
+        report_name_lower = report_path.name.lower()
+        is_xqtc_report = "xqtc" in report_name_lower
+        is_xqtc_wip = is_xqtc_report and "wip" in report_name_lower
+
+        if is_xqtc_report:
+            working["material_key"] = working["Material"].apply(normalize_material_key)
+            working = working[working["material_key"].astype(bool)].copy()
+            if working.empty:
+                continue
+
+            working = working.merge(xqtc_9su_mapping, on="material_key", how="left")
+            bottle_mask = working.get("is_bottle_line", False)
+            if not isinstance(bottle_mask, pd.Series):
+                bottle_mask = pd.Series(False, index=working.index)
+            removed_non_bottle = int((~bottle_mask.fillna(False)).sum())
+            working = working[bottle_mask.fillna(False)].copy()
+            if removed_non_bottle > 0:
+                logging.info(
+                    "XQTC file %s removed %s non-Bottle-Line rows by Parameter Technology",
+                    report_path,
+                    removed_non_bottle,
+                )
+            if working.empty:
+                continue
+
+        if is_xqtc_wip:
+            missing_su9 = working.get("su9", pd.Series(dtype=float)).isna().sum()
+            if missing_su9 > 0:
+                logging.warning(
+                    "XQTC WIP file %s has %s materials without 9字头SU mapping; treated as 0",
+                    report_path,
+                    int(missing_su9),
+                )
+
         for month_col in normalized_month_cols:
-            working[month_col] = parse_numeric(working[month_col]) / scale_factor
+            month_values = parse_numeric(working[month_col])
+            if is_xqtc_wip:
+                su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
+                working[month_col] = month_values * su9_values / 1000.0
+            elif is_xqtc_report:
+                working[month_col] = month_values / 1000.0
+            else:
+                working[month_col] = month_values
             month_labels.add(month_col)
 
         grouped = (
@@ -968,6 +1088,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
 
     detail_frames: list[pd.DataFrame] = []
     month_labels: set[str] = set()
+    xqtc_9su_mapping = read_xqtc_9su_mapping(root)
 
     for report_path in production_vol_reports:
         try:
@@ -1041,9 +1162,44 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
         working = working.rename(columns=rename_map)
 
         normalized_month_cols = sorted({label for label in rename_map.values()})
-        scale_factor = 1000.0 if "xqtc" in report_path.name.lower() else 1.0
+        report_name_lower = report_path.name.lower()
+        is_xqtc_report = "xqtc" in report_name_lower
+        is_xqtc_wip = is_xqtc_report and "wip" in report_name_lower
+
+        if is_xqtc_report:
+            working = working.merge(xqtc_9su_mapping, on="material_key", how="left")
+            bottle_mask = working.get("is_bottle_line", False)
+            if not isinstance(bottle_mask, pd.Series):
+                bottle_mask = pd.Series(False, index=working.index)
+            removed_non_bottle = int((~bottle_mask.fillna(False)).sum())
+            working = working[bottle_mask.fillna(False)].copy()
+            if removed_non_bottle > 0:
+                logging.info(
+                    "XQTC file %s removed %s non-Bottle-Line rows by Parameter Technology",
+                    report_path,
+                    removed_non_bottle,
+                )
+            if working.empty:
+                continue
+
+        if is_xqtc_wip:
+            missing_su9 = working.get("su9", pd.Series(dtype=float)).isna().sum()
+            if missing_su9 > 0:
+                logging.warning(
+                    "XQTC WIP file %s has %s materials without 9字头SU mapping; treated as 0",
+                    report_path,
+                    int(missing_su9),
+                )
+
         for month_col in normalized_month_cols:
-            working[month_col] = parse_numeric(working[month_col]) / scale_factor
+            month_values = parse_numeric(working[month_col])
+            if is_xqtc_wip:
+                su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
+                working[month_col] = month_values * su9_values / 1000.0
+            elif is_xqtc_report:
+                working[month_col] = month_values / 1000.0
+            else:
+                working[month_col] = month_values
             month_labels.add(month_col)
 
         working = working.merge(level1_mapping, on="material_key", how="left")
@@ -1134,6 +1290,42 @@ def normalize_hc_idp_prod_line_bucket(value: object) -> Optional[str]:
     return None
 
 
+def detect_weekly_tp_layout(raw: pd.DataFrame) -> tuple[Optional[int], Optional[int], Optional[int], Optional[int]]:
+    if raw is None or raw.empty:
+        return None, None, None, None
+
+    max_scan_rows = min(80, len(raw))
+    header_row: Optional[int] = None
+    lbe_col_idx: Optional[int] = None
+    prod_line_col_idx: Optional[int] = None
+    apo_col_idx: Optional[int] = None
+
+    for row_idx in range(max_scan_rows):
+        row_values = raw.iloc[row_idx].fillna("").astype(str).str.strip()
+        row_lower = row_values.str.lower()
+
+        lbe_hits = [int(i) for i, text in enumerate(row_lower.tolist()) if text == "lbe"]
+        prod_hits = [int(i) for i, text in enumerate(row_lower.tolist()) if text == "prod line"]
+
+        if lbe_hits and prod_hits:
+            header_row = row_idx
+            lbe_col_idx = lbe_hits[0]
+            prod_line_col_idx = prod_hits[0]
+
+            apo_hits = [int(i) for i, text in enumerate(row_lower.tolist()) if text == "apo product"]
+            if apo_hits:
+                apo_col_idx = apo_hits[0]
+            break
+
+    if header_row is None:
+        return None, None, None, None
+
+    if apo_col_idx is None and raw.shape[1] > 7:
+        apo_col_idx = 7
+
+    return header_row, lbe_col_idx, prod_line_col_idx, apo_col_idx
+
+
 def summarize_hc_idp_weekly_current_month(report_path: Path) -> pd.DataFrame:
     try:
         raw = pd.read_excel(report_path, sheet_name="Weekly(TP)", header=None)
@@ -1141,15 +1333,17 @@ def summarize_hc_idp_weekly_current_month(report_path: Path) -> pd.DataFrame:
         logging.exception("Failed to read Weekly(TP) sheet from %s", report_path)
         return pd.DataFrame(columns=["Prod Line AS"])
 
-    # In current report layout, ER -> LBE is column 147 and Prod Line is column 153.
-    lbe_col_idx = 147
-    prod_line_col_idx = 153
-    data_start_row = 15
+    header_row, lbe_col_idx, prod_line_col_idx, _ = detect_weekly_tp_layout(raw)
+    if header_row is None or lbe_col_idx is None or prod_line_col_idx is None:
+        logging.warning("Failed to detect Weekly(TP) header layout in %s", report_path)
+        return pd.DataFrame(columns=["Prod Line AS"])
+
+    data_start_row = header_row + 1
     if raw.shape[1] <= max(lbe_col_idx, prod_line_col_idx) or raw.shape[0] <= data_start_row:
         logging.warning("Weekly(TP) sheet layout is smaller than expected in %s", report_path)
         return pd.DataFrame(columns=["Prod Line AS"])
 
-    current_month_label = pd.Timestamp.today().strftime("%Y-%m")
+    current_month_label = infer_hc_idp_report_period(report_path).strftime("%Y-%m")
     working = raw.iloc[data_start_row:, [prod_line_col_idx, lbe_col_idx]].copy()
     working.columns = ["prod_line", "lbe"]
     working["Prod Line AS"] = working["prod_line"].apply(normalize_hc_idp_prod_line_bucket)
@@ -1176,10 +1370,15 @@ def summarize_hc_idp_weekly_current_month_detail(report_path: Path, current_mont
         logging.exception("Failed to read Weekly(TP) sheet from %s", report_path)
         return pd.DataFrame(columns=["Prod Line", "APO Product", "Month", "Value"])
 
-    lbe_col_idx = 147
-    prod_line_col_idx = 153
-    apo_col_idx = 7
-    data_start_row = 15
+    header_row, lbe_col_idx, prod_line_col_idx, apo_col_idx = detect_weekly_tp_layout(raw)
+    if header_row is None or lbe_col_idx is None or prod_line_col_idx is None:
+        logging.warning("Failed to detect Weekly(TP) header layout in %s", report_path)
+        return pd.DataFrame(columns=["Prod Line", "APO Product", "Month", "Value"])
+
+    if apo_col_idx is None:
+        apo_col_idx = 7
+
+    data_start_row = header_row + 1
     if raw.shape[1] <= max(lbe_col_idx, prod_line_col_idx, apo_col_idx) or raw.shape[0] <= data_start_row:
         logging.warning("Weekly(TP) sheet layout is smaller than expected in %s", report_path)
         return pd.DataFrame(columns=["Prod Line", "APO Product", "Month", "Value"])

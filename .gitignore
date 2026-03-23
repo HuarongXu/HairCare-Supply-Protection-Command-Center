@@ -26,3 +26,6 @@ data/processed/
 # Legacy local dashboard snapshots
 dashboards/matres_app V*.py
 dashboards/matres_app copy.py
+!dashboards/matres_app V38*.py
+!dashboards/matres_app V39*.py
+!dashboards/matres_app V40*.py
