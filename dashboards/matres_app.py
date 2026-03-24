@@ -6,6 +6,8 @@ import ipaddress
 import logging
 import os
 import re
+import subprocess
+import sys
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,7 +17,7 @@ import dash
 from dash import Dash, Input, Output, State, dcc, html
 from dash.dash_table import DataTable
 from dash.exceptions import PreventUpdate
-from flask import abort, request
+from flask import Response, abort, request
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -1680,6 +1682,29 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     return out_dir, excel_path, total_tables
 
 
+def regenerate_weekly_mail_preview(cfg: AppConfig) -> Path:
+    script_path = cfg.processed_dir.parent.parent / "scripts" / "generate_weekly_mail_preview.py"
+    if not script_path.exists():
+        raise FileNotFoundError(f"Mail preview script not found: {script_path}")
+
+    subprocess.run(
+        [sys.executable, str(script_path)],
+        cwd=str(cfg.processed_dir.parent.parent),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    weekly_mail_dir = cfg.processed_dir / "weekly_mail"
+    if not weekly_mail_dir.exists():
+        raise FileNotFoundError(f"Weekly mail output directory not found: {weekly_mail_dir}")
+
+    html_candidates = sorted(weekly_mail_dir.glob("Supply_Protection_Update_*.html"), key=lambda p: p.stat().st_mtime)
+    if not html_candidates:
+        raise FileNotFoundError(f"No weekly mail html generated in: {weekly_mail_dir}")
+    return html_candidates[-1]
+
+
 def build_td_validation_table(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
     base_columns = [
         {"name": "Version", "id": "Version"},
@@ -3234,6 +3259,12 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         children=[
                             html.Button("Backup Snapshot", id="backup-snapshot-btn", n_clicks=0),
                             html.Span("", id="backup-snapshot-status", style={"fontSize": "13px", "color": "#334155", "textAlign": "right"}),
+                            html.A(
+                                html.Button("Refresh Mail & Open HTML", id="refresh-mail-open-btn", n_clicks=0),
+                                href="/mail-preview/latest",
+                                target="_blank",
+                                style={"textDecoration": "none"},
+                            ),
                             dcc.Download(id="backup-snapshot-download"),
                         ],
                     ),
@@ -3659,6 +3690,16 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
 def create_app() -> Dash:
     cfg = AppConfig.load(CONFIG_PATH)
     app = Dash(__name__, title="Supply Protection Commander", assets_folder=str(Path(__file__).parent / "assets"))
+
+    @app.server.route("/mail-preview/latest", methods=["GET"])
+    def mail_preview_latest() -> Response:
+        try:
+            html_file = regenerate_weekly_mail_preview(cfg)
+            html_text = html_file.read_text(encoding="utf-8")
+            return Response(html_text, mimetype="text/html; charset=utf-8")
+        except Exception:
+            logging.exception("Failed to regenerate/open weekly mail preview")
+            return Response("Failed to refresh weekly mail preview. Please check server logs.", status=500)
 
     raw_allowed_subnets = os.getenv("MATRES_ALLOWED_SUBNETS", "").strip()
     if raw_allowed_subnets:
