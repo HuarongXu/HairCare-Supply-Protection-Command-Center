@@ -181,6 +181,9 @@ Install already included in requirements.
 - IYA tables display percentages.
 
 ## 11) Dashboard Pages (Current)
+- `Global Header Actions`
+	- `Backup Snapshot`: one-click export of current dashboard snapshot (Excel + CSV history folder).
+	- `Refresh Mail & Open HTML`: one-click regenerate weekly mail content and open the latest HTML preview in a new tab.
 - `Demand Assumption`
 	- Demand LBE / Demand LBE IYA / Demand HS / Demand HS IYA.
 	- Supply Protection split tables: `(PP + Base)` and `(HKTW + ESS)`.
@@ -210,4 +213,23 @@ Install already included in requirements.
 	- data source files,
 	- key calculations and aggregation rules,
 	- refresh and operation notes.
+
+## 13) GitHub Push (Recommended for Unstable Network)
+
+### 13.1 Standard push
+```powershell
+git push origin main
+```
+
+### 13.2 If TLS / schannel disconnect happens, use validated retry command
+> This command has been validated successfully in the current environment.
+
+```powershell
+$ok=$false; 1..3 | ForEach-Object { Write-Host "Push attempt $_"; git -c http.version=HTTP/1.1 -c http.schannelCheckRevoke=false push origin main; if ($LASTEXITCODE -eq 0) { $ok=$true; break } Start-Sleep -Seconds 2 }; if (-not $ok) { exit 1 }
+```
+
+Notes:
+- Uses `HTTP/1.1` to reduce TLS compatibility issues in some environments.
+- Disables `schannel` revocation check only for this command (no global config change).
+- Retries up to 3 times and exits immediately once one attempt succeeds.
 

@@ -173,6 +173,9 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 - IYA 表显示百分比
 
 ## 11）页面功能总览（最新）
+- `全局操作（页头）`
+  - `Backup Snapshot`：一键导出当前看板快照（Excel + CSV 历史目录）。
+  - `Refresh Mail & Open HTML`：一键刷新周报邮件内容并在新标签页打开最新 HTML 预览。
 - `Demand Assumption`
   - 包含 `Demand LBE`、`Demand LBE IYA`、`Demand HS`、`Demand HS IYA`。
   - Supply Protection 拆分为 `(PP + Base)` 与 `(HKTW + ESS)` 两块。
@@ -201,3 +204,22 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
   - 数据来源文件，
   - 主要计算逻辑与口径，
   - 刷新与运维建议。
+
+## 13）GitHub 推送（网络不稳定时推荐）
+
+### 13.1 常规推送
+```powershell
+git push origin main
+```
+
+### 13.2 若出现 TLS / schannel 断连，使用已验证成功方式
+> 本项目在当前环境下已成功使用以下命令推送。
+
+```powershell
+$ok=$false; 1..3 | ForEach-Object { Write-Host "Push attempt $_"; git -c http.version=HTTP/1.1 -c http.schannelCheckRevoke=false push origin main; if ($LASTEXITCODE -eq 0) { $ok=$true; break } Start-Sleep -Seconds 2 }; if (-not $ok) { exit 1 }
+```
+
+说明：
+- 使用 `HTTP/1.1` 降低部分网络环境下的 TLS 兼容问题。
+- 关闭本次命令的 `schannel` 证书撤销检查（仅当前命令生效，不改全局配置）。
+- 自动重试最多 3 次，任一次成功即停止。
