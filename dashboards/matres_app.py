@@ -1583,17 +1583,10 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     page_sheets["Demand Data"].append(("01 TD Version Monthly Comparison", _snapshot_to_dataframe(td_validation_columns, td_validation_rows)))
 
     production_group_1 = ["0386", "1864", "A868"]
-    production_group_2 = ["C810", "D352", "A673"]
     production_group_1_totals_after = {
         "0386": ("HP Total", ["0386", "C810"]),
         "1864": ("XQ Total", ["1864", "D352"]),
         "A868": ("TC Total", ["A868", "A673"]),
-    }
-    production_group_2_level = ["C810", "D352", "A673"]
-    production_group_2_totals_after = {
-        "C810": ("HP Total", ["0386", "C810"]),
-        "D352": ("XQ Total", ["1864", "D352"]),
-        "A673": ("TC Total", ["A868", "A673"]),
     }
 
     p1_columns, p1_rows = build_production_data_table_by_plant(
@@ -1610,21 +1603,6 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
         segment_totals_after=production_group_1_totals_after,
     )
     page_sheets["Production Data"].append(("02 Table2 Plant-Level1-Level2", _snapshot_to_dataframe(p2_columns, p2_rows)))
-
-    p3_columns, p3_rows = build_production_data_table_by_plant(
-        production_data_df,
-        plant_order=production_group_2,
-        include_segment_totals=False,
-    )
-    page_sheets["Production Data"].append(("03 Table3 By Plant", _snapshot_to_dataframe(p3_columns, p3_rows)))
-
-    p4_columns, p4_rows = build_production_data_table_by_plant_level(
-        production_data_by_level_df,
-        plant_order=production_group_2_level,
-        include_segment_totals=True,
-        segment_totals_after=production_group_2_totals_after,
-    )
-    page_sheets["Production Data"].append(("04 Table4 Plant-Level1-Level2", _snapshot_to_dataframe(p4_columns, p4_rows)))
 
     page_sheets["Raw Data"].extend(
         [
@@ -2304,6 +2282,7 @@ def build_modal_detail_rows(
     item_text: str,
     mrp_indicator: str,
     requester_emails: Optional[List[str]] = None,
+    selected_month: Optional[str] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     if df.empty:
         columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
@@ -2320,6 +2299,14 @@ def build_modal_detail_rows(
     selected_emails = normalize_requester_values(requester_emails)
     if selected_emails and "Requester Email" in working.columns:
         working = working[working["Requester Email"].fillna("").astype(str).isin(set(selected_emails))]
+
+    if selected_month and re.fullmatch(r"\d{4}-\d{2}", str(selected_month).strip()):
+        month_value = str(selected_month).strip()
+        if "availability_month" in working.columns:
+            working = working[working["availability_month"].astype(str).str.strip() == month_value]
+        elif "Availability Date" in working.columns:
+            derived_month = pd.to_datetime(working["Availability Date"], errors="coerce").dt.to_period("M").astype(str)
+            working = working[derived_month == month_value]
 
     if working.empty:
         columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
@@ -2520,17 +2507,10 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         hc_idp_quarter_iya_rows,
     )
     production_group_1 = ["0386", "1864", "A868"]
-    production_group_2 = ["C810", "D352", "A673"]
     production_group_1_totals_after = {
         "0386": ("HP Total", ["0386", "C810"]),
         "1864": ("XQ Total", ["1864", "D352"]),
         "A868": ("TC Total", ["A868", "A673"]),
-    }
-    production_group_2_level = ["C810", "D352", "A673"]
-    production_group_2_totals_after = {
-        "C810": ("HP Total", ["0386", "C810"]),
-        "D352": ("XQ Total", ["1864", "D352"]),
-        "A673": ("TC Total", ["A868", "A673"]),
     }
     production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
         production_data_df,
@@ -2540,17 +2520,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     production_level_columns_1, production_level_rows_1 = build_production_data_table_by_plant_level(
         production_data_by_level_df,
         plant_order=production_group_1,
-    )
-    production_plant_columns_2, production_plant_rows_2 = build_production_data_table_by_plant(
-        production_data_df,
-        plant_order=production_group_2,
-        include_segment_totals=False,
-    )
-    production_level_columns_2, production_level_rows_2 = build_production_data_table_by_plant_level(
-        production_data_by_level_df,
-        plant_order=production_group_2_level,
-        include_segment_totals=True,
-        segment_totals_after=production_group_2_totals_after,
     )
     td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
     td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
@@ -3165,68 +3134,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         sort_action="native",
                         filter_action="none",
                     ),
-                    html.H4("Production Data (By Plant) - Table 3", style={"marginTop": "18px"}),
-                    DataTable(
-                        id="production-data-plant-table-3",
-                        columns=production_plant_columns_2,
-                        data=production_plant_rows_2,
-                        style_header=PDE_STYLE_HEADER,
-                        style_cell=PDE_STYLE_CELL,
-                        style_data_conditional=[
-                            *PDE_STYLE_DATA_CONDITIONAL,
-                            {
-                                "if": {
-                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
-                                },
-                                "fontWeight": "700",
-                                "backgroundColor": "#f3f8ff",
-                            },
-                            {
-                                "if": {"filter_query": '{Plant} = "GC Total"'},
-                                "fontWeight": "700",
-                                "backgroundColor": "#edf4ff",
-                            },
-                        ],
-                        style_cell_conditional=[
-                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
-                        ],
-                        page_action="none",
-                        style_table={"overflowX": "auto"},
-                        sort_action="native",
-                        filter_action="none",
-                    ),
-                    html.H4("Production Data (By Plant / Level1 / Level2) - Table 4", style={"marginTop": "18px"}),
-                    DataTable(
-                        id="production-data-level-table-4",
-                        columns=production_level_columns_2,
-                        data=production_level_rows_2,
-                        style_header=PDE_STYLE_HEADER,
-                        style_cell=PDE_STYLE_CELL,
-                        style_data_conditional=[
-                            *PDE_STYLE_DATA_CONDITIONAL,
-                            {
-                                "if": {
-                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
-                                },
-                                "fontWeight": "700",
-                                "backgroundColor": "#f3f8ff",
-                            },
-                            {
-                                "if": {"filter_query": '{Plant} = "GC Total"'},
-                                "fontWeight": "700",
-                                "backgroundColor": "#edf4ff",
-                            },
-                        ],
-                        style_cell_conditional=[
-                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
-                            {"if": {"column_id": "Level1"}, "textAlign": "left"},
-                            {"if": {"column_id": "Level2"}, "textAlign": "left"},
-                        ],
-                        page_action="none",
-                        style_table={"overflowX": "auto"},
-                        sort_action="native",
-                        filter_action="none",
-                    ),
                 ],
             ),
         ],
@@ -3338,10 +3245,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("production-data-plant-table-1", "data"),
         Output("production-data-level-table-2", "columns"),
         Output("production-data-level-table-2", "data"),
-        Output("production-data-plant-table-3", "columns"),
-        Output("production-data-plant-table-3", "data"),
-        Output("production-data-level-table-4", "columns"),
-        Output("production-data-level-table-4", "data"),
         Input("data-store", "data"),
         Input("role-filter", "value"),
         Input("drill-role-filter", "value"),
@@ -3399,17 +3302,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
         td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
         production_group_1 = ["0386", "1864", "A868"]
-        production_group_2 = ["C810", "D352", "A673"]
         production_group_1_totals_after = {
             "0386": ("HP Total", ["0386", "C810"]),
             "1864": ("XQ Total", ["1864", "D352"]),
             "A868": ("TC Total", ["A868", "A673"]),
-        }
-        production_group_2_level = ["C810", "D352", "A673"]
-        production_group_2_totals_after = {
-            "C810": ("HP Total", ["0386", "C810"]),
-            "D352": ("XQ Total", ["1864", "D352"]),
-            "A673": ("TC Total", ["A868", "A673"]),
         }
         production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
             production_data_df,
@@ -3421,17 +3317,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             plant_order=production_group_1,
             include_segment_totals=True,
             segment_totals_after=production_group_1_totals_after,
-        )
-        production_plant_columns_2, production_plant_rows_2 = build_production_data_table_by_plant(
-            production_data_df,
-            plant_order=production_group_2,
-            include_segment_totals=False,
-        )
-        production_level_columns_2, production_level_rows_2 = build_production_data_table_by_plant_level(
-            production_data_by_level_df,
-            plant_order=production_group_2_level,
-            include_segment_totals=True,
-            segment_totals_after=production_group_2_totals_after,
         )
         level1_core_columns, level1_core_rows = build_first_level_summary(
             monthly_level1,
@@ -3482,10 +3367,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             production_plant_rows_1,
             production_level_columns_1,
             production_level_rows_1,
-            production_plant_columns_2,
-            production_plant_rows_2,
-            production_level_columns_2,
-            production_level_rows_2,
         )
 
     @app.callback(
@@ -3600,11 +3481,12 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("drill-detail-table", "data"),
         Input("role-item-mrp-summary", "active_cell"),
         Input("details-version-store", "data"),
+        State("role-item-mrp-summary", "columns"),
         State("role-item-mrp-summary", "data"),
         State("role-item-mrp-summary", "derived_viewport_data"),
         State("drill-requester-filter", "value"),
     )
-    def update_drill_details(active_cell, _version_data, summary_rows, viewport_rows, drill_requester_value):
+    def update_drill_details(active_cell, _version_data, summary_columns, summary_rows, viewport_rows, drill_requester_value):
         details = load_request_details(cfg)
         default_columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
         if not active_cell:
@@ -3629,8 +3511,42 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         mrp_indicator = selected_row.get("MRP Element Indicator") or ""
         selected_requesters = normalize_requester_values(drill_requester_value)
 
+        clicked_column = str(active_cell.get("column_id", "") or "").strip()
+        if not clicked_column and summary_columns:
+            col_index = active_cell.get("column")
+            if isinstance(col_index, int) and 0 <= col_index < len(summary_columns):
+                clicked_column = str(summary_columns[col_index].get("id", "") or "").strip()
+
+        def normalize_selected_month(value: str) -> Optional[str]:
+            text = str(value or "").strip()
+            if not text or text == TOTAL_LABEL:
+                return None
+            if re.fullmatch(r"\d{4}-\d{2}", text):
+                return text
+            if re.fullmatch(r"\d{4}-\d{1}", text):
+                year, month = text.split("-", 1)
+                return f"{year}-{int(month):02d}"
+            try:
+                period = pd.Period(text, freq="M")
+                return f"{period.year}-{period.month:02d}"
+            except Exception:
+                pass
+            parsed = pd.to_datetime(text, errors="coerce")
+            if pd.notna(parsed):
+                return parsed.strftime("%Y-%m")
+            return None
+
+        selected_month = normalize_selected_month(clicked_column)
+
         try:
-            columns, rows = build_modal_detail_rows(details, role, item_text, mrp_indicator, selected_requesters)
+            columns, rows = build_modal_detail_rows(
+                details,
+                role,
+                item_text,
+                mrp_indicator,
+                selected_requesters,
+                selected_month,
+            )
         except Exception:
             logging.exception("Failed to build drill detail rows: role=%s item=%s mrp=%s", role, item_text, mrp_indicator)
             return "加载明细失败，请稍后重试", [{"name": "错误", "id": "error"}], [{"error": "加载明细失败"}]
@@ -3638,6 +3554,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         role_title = ROLE_DISPLAY_MAP.get(str(role).strip(), str(role).strip())
         title_parts = [part for part in [role_title, item_text, mrp_indicator] if part]
         title = " / ".join(title_parts) if title_parts else "明细列表"
+        if selected_month:
+            title = f"{title} / {selected_month}"
         if not rows:
             return f"{title} · 暂无数据", columns or default_columns, rows
         return title, columns, rows
