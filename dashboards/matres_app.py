@@ -769,6 +769,13 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
     columns.append({"name": TOTAL_LABEL, "id": TOTAL_LABEL})
 
     records: List[Dict] = []
+
+    def fmt(value: Any) -> str:
+        numeric = pd.to_numeric(value, errors="coerce")
+        if pd.isna(numeric) or float(numeric) == 0.0:
+            return "-"
+        return f"{float(numeric):,.1f}"
+
     for requester, row in pivot.iterrows():
         record = {
             "Requester Email": requester,
@@ -776,7 +783,7 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
         }
         for label in date_labels + [TOTAL_LABEL]:
             value = row.get(label, 0)
-            record[label] = f"{value:,.1f}" if pd.notna(value) else "-"
+            record[label] = fmt(value)
         records.append(record)
 
     return columns, records
@@ -2474,7 +2481,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     role_options = build_role_options(monthly_requester)
     default_role = role_options[0]["value"] if role_options else ROLE_ALL_VALUE
     role_matrix_columns, role_matrix_data = build_monthly_matrix(monthly_requester, ROLE_ALL_VALUE)
-    summary_columns, summary_data = build_item_summary(monthly_requester, default_role)
     pde_columns, pde_data = build_pde_matrix(pde_alerts)
     summary_drill_columns, summary_drill_rows = build_role_item_project_summary(request_details, default_role)
     drill_requester_options = build_requester_email_options(request_details, default_role)
@@ -2618,22 +2624,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 ],
                             ),
                         ],
-                    ),
-                ],
-            ),
-            html.Div(
-                className="summary-panel",
-                children=[
-                    html.H3("Monthly Summary"),
-                    DataTable(
-                        id="monthly-summary",
-                        columns=summary_columns,
-                        data=summary_data,
-                        style_header=PDE_STYLE_HEADER,
-                        style_cell=PDE_STYLE_CELL,
-                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
-                        page_action="none",
-                        style_table={"overflowX": "auto"},
                     ),
                 ],
             ),
@@ -3211,8 +3201,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
     @app.callback(
         Output("role-item-table", "columns"),
         Output("role-item-table", "data"),
-        Output("monthly-summary", "columns"),
-        Output("monthly-summary", "data"),
         Output("role-trend", "figure"),
         Output("pde-table", "columns"),
         Output("pde-table", "data"),
@@ -3276,7 +3264,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             indicator for indicator in selected_mrp_indicators
             if any(option.get("value") == indicator for option in drill_mrp_options)
         ]
-        summary_columns, summary_data = build_item_summary(monthly_requester, selected_role)
         role_fig = build_role_trend(monthly_requester, selected_role)
         pde_columns, pde_records = build_pde_matrix(pde_alerts)
         drill_columns, drill_rows = build_role_item_project_summary(
@@ -3333,8 +3320,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         return (
             table_columns,
             table_data,
-            summary_columns,
-            summary_data,
             role_fig,
             pde_columns,
             pde_records,
