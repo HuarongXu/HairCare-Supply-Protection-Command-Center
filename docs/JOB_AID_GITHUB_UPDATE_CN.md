@@ -41,20 +41,77 @@ cd HairCare-Supply-Protection-Command-Center
 
 ---
 
-## 二、已存在本地仓库时，同步 GitHub 最新代码
+## 二、在另一台电脑更新到 GitHub 最新版本（推荐流程）
 
+### 场景 A：目录已经是 Git 仓库（最常见）
 进入项目目录后执行：
 
 ```powershell
+git rev-parse --is-inside-work-tree
 git checkout main
 git pull origin main
 ```
 
-然后重启服务（建议）：
-- 先关闭旧的 Dashboard 进程
-- 再重新运行 `One Click Start Up/start_matres.bat`
+然后同步依赖并重启服务：
 
-> 说明：改 Python 代码后，仅浏览器刷新不一定生效，通常需要重启服务。
+```powershell
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+python .\scripts\matres_pipeline.py
+python .\dashboards\matres_app.py
+```
+
+---
+
+### 场景 B：你之前是下载 ZIP 解压（不是 Git 仓库）
+如果 `git rev-parse --is-inside-work-tree` 报错，执行：
+
+```powershell
+git init
+git remote add origin https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git
+git fetch origin
+git checkout -B main origin/main
+```
+
+> 若提示 `remote origin already exists`，可先执行：
+> `git remote remove origin` 再重新 `git remote add origin ...`
+
+---
+
+### 场景 C：报错 “untracked files would be overwritten by checkout”
+先备份本地配置，再清理未跟踪文件（保留虚拟环境和数据）：
+
+```powershell
+robocopy .\config .\_backup_config /E
+git clean -fd -e .venv -e data -e _backup_config
+git fetch origin
+git checkout -B main origin/main
+git reset --hard origin/main
+```
+
+---
+
+### 启动脚本路径有空格时
+请用引号运行（不要在 `.bat` 后面加 `\`）：
+
+```powershell
+& ".\One Click Start Up\start_matres.bat"
+```
+
+如果仓库里没有该脚本，则直接运行：
+
+```powershell
+python .\dashboards\matres_app.py
+```
+
+---
+
+### 更新是否成功（检查）
+```powershell
+git log -1 --oneline
+```
+
+应显示最新提交（例如：`69ece6c ...` 或更新的 commit）。
 
 ---
 
