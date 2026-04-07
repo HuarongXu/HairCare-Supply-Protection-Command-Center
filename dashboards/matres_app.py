@@ -82,7 +82,17 @@ def load_historical_shipment_dataset(cfg: AppConfig) -> pd.DataFrame:
     if not unique_candidates:
         return pd.DataFrame()
 
-    file_path = max(unique_candidates, key=lambda p: p.stat().st_mtime)
+    accessible_candidates: List[Tuple[float, Path]] = []
+    for candidate in unique_candidates:
+        try:
+            accessible_candidates.append((candidate.stat().st_mtime, candidate))
+        except (PermissionError, OSError):
+            logging.warning("Skipping inaccessible historical shipment file: %s", candidate)
+
+    if not accessible_candidates:
+        return pd.DataFrame()
+
+    file_path = max(accessible_candidates, key=lambda item: item[0])[1]
     try:
         raw = pd.read_excel(file_path, sheet_name="Sheet1", header=None)
     except Exception:
@@ -787,6 +797,99 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
         records.append(record)
 
     return columns, records
+
+
+def summarize_pde_alerts_from_details(df: pd.DataFrame, fg_only: bool) -> pd.DataFrame:
+    output_columns = [
+        "Requester Email",
+        "availability_date",
+        "availability_month",
+        "msu_due",
+        "open_items",
+        "max_pde",
+        "avg_pde",
+        "closest_availability",
+        "project_label",
+        "requester_role",
+    ]
+    required_columns = ["PDE Checking", "Availability Date", "MSU", "Requester Email", "Item Text"]
+    if df.empty or any(col not in df.columns for col in required_columns):
+        return pd.DataFrame(columns=output_columns)
+
+    working = df.copy()
+    working["Item Text"] = working["Item Text"].fillna("").astype(str).str.strip()
+    item_text_key = working["Item Text"].str.lower()
+    if fg_only:
+        working = working[item_text_key == "fg rolling"].copy()
+    else:
+        working = working[item_text_key != "fg rolling"].copy()
+
+    if working.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    working["PDE Checking"] = pd.to_numeric(working["PDE Checking"], errors="coerce")
+    working = working[working["PDE Checking"].notna()].copy()
+    if working.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    working["Availability Date"] = pd.to_datetime(working["Availability Date"], errors="coerce")
+    working = working[working["Availability Date"].notna()].copy()
+    if working.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    working["MSU"] = pd.to_numeric(working.get("MSU", 0), errors="coerce").fillna(0.0)
+    if "MRP Element Indicator" not in working.columns:
+        working["MRP Element Indicator"] = ""
+    if "requester_role" not in working.columns:
+        working["requester_role"] = UNKNOWN_ROLE
+    working["requester_role"] = working["requester_role"].fillna(UNKNOWN_ROLE)
+
+    def combine_project(values: pd.Series) -> str:
+        cleaned = sorted({str(v).strip() for v in values if pd.notna(v) and str(v).strip()})
+        return " / ".join(cleaned) if cleaned else "未定义"
+
+    working["availability_date"] = working["Availability Date"].dt.date
+    summary = (
+        working.groupby(["Requester Email", "availability_date"], dropna=False)
+        .agg(
+            msu_due=("MSU", "sum"),
+            open_items=("PDE Checking", "count"),
+            max_pde=("PDE Checking", "max"),
+            avg_pde=("PDE Checking", "mean"),
+            closest_availability=("Availability Date", "min"),
+            project_label=("MRP Element Indicator", combine_project),
+            requester_role=("requester_role", "first"),
+        )
+        .reset_index()
+    )
+
+    summary["avg_pde"] = summary["avg_pde"].round(1)
+    summary["msu_due"] = summary["msu_due"].round(2)
+    summary["availability_date"] = summary["availability_date"].astype(str)
+    summary["availability_month"] = (
+        pd.to_datetime(summary["availability_date"], errors="coerce")
+        .dt.to_period("M")
+        .astype(str)
+    )
+    summary["closest_availability"] = summary["closest_availability"].dt.strftime("%Y-%m-%d")
+
+    return summary.sort_values(["closest_availability", "max_pde"], ascending=[True, False])
+
+
+def build_pde_tables(
+    pde_alerts_df: pd.DataFrame,
+    request_details_df: pd.DataFrame,
+) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
+    if not request_details_df.empty and "Item Text" in request_details_df.columns:
+        normal_summary = summarize_pde_alerts_from_details(request_details_df, fg_only=False)
+        fg_summary = summarize_pde_alerts_from_details(request_details_df, fg_only=True)
+        normal_columns, normal_records = build_pde_matrix(normal_summary)
+        fg_columns, fg_records = build_pde_matrix(fg_summary)
+        return normal_columns, normal_records, fg_columns, fg_records
+
+    normal_columns, normal_records = build_pde_matrix(pde_alerts_df)
+    fg_columns, fg_records = build_pde_matrix(pd.DataFrame())
+    return normal_columns, normal_records, fg_columns, fg_records
 
 
 def build_hc_idp_monthly_table(df: pd.DataFrame, as_percent: bool = False) -> Tuple[List[Dict], List[Dict]]:
@@ -1546,7 +1649,7 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     summary_columns, summary_data = build_item_summary(monthly_requester, ROLE_ALL_VALUE)
     page_sheets["Supply Protection"].append(("02 Monthly Summary", _snapshot_to_dataframe(summary_columns, summary_data)))
 
-    pde_columns, pde_data = build_pde_matrix(pde_alerts)
+    pde_columns, pde_data, pde_fg_columns, pde_fg_data = build_pde_tables(pde_alerts, request_details)
     page_sheets["Supply Protection"].append(("03 Past Due Alerts", _snapshot_to_dataframe(pde_columns, pde_data)))
 
     drill_columns, drill_rows = build_role_item_project_summary(request_details, ROLE_ALL_VALUE, [], [])
@@ -2280,7 +2383,30 @@ def build_role_item_project_summary(
         records_with_totals.append((total_value if pd.notna(total_value) else 0, record))
 
     sorted_records = [rec for _, rec in sorted(records_with_totals, key=lambda item: item[0], reverse=True)]
+
+    total_record: Dict[str, Any] = {
+        "Role": TOTAL_LABEL,
+        "Item Text": TOTAL_LABEL,
+        "MRP Element Indicator": "",
+        "__role_raw": TOTAL_LABEL,
+    }
+    for month in months:
+        total_record[month] = fmt(pd.to_numeric(pivot[month], errors="coerce").fillna(0.0).sum(min_count=1))
+    total_record[TOTAL_LABEL] = fmt(pd.to_numeric(pivot[TOTAL_LABEL], errors="coerce").fillna(0.0).sum(min_count=1))
+    sorted_records.append(total_record)
+
     return columns, sorted_records
+
+
+def extract_role_item_project_total_row(
+    columns: List[Dict[str, Any]],
+    rows: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    total_rows = [
+        row for row in (rows or [])
+        if str(row.get("Role", "")).strip() == TOTAL_LABEL and str(row.get("Item Text", "")).strip() == TOTAL_LABEL
+    ]
+    return columns or [], total_rows[:1]
 
 
 def build_modal_detail_rows(
@@ -2481,8 +2607,9 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     role_options = build_role_options(monthly_requester)
     default_role = role_options[0]["value"] if role_options else ROLE_ALL_VALUE
     role_matrix_columns, role_matrix_data = build_monthly_matrix(monthly_requester, ROLE_ALL_VALUE)
-    pde_columns, pde_data = build_pde_matrix(pde_alerts)
+    pde_columns, pde_data, pde_fg_columns, pde_fg_data = build_pde_tables(pde_alerts, request_details)
     summary_drill_columns, summary_drill_rows = build_role_item_project_summary(request_details, default_role)
+    summary_total_columns, summary_total_rows = extract_role_item_project_total_row(summary_drill_columns, summary_drill_rows)
     drill_requester_options = build_requester_email_options(request_details, default_role)
     drill_mrp_options = build_mrp_indicator_options(request_details, default_role)
 
@@ -2659,6 +2786,35 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         page_size=10,
                         style_table={"overflowX": "auto"},
                     ),
+                    html.H3("FG Rolling", style={"marginTop": "14px"}),
+                    DataTable(
+                        id="pde-fg-table",
+                        columns=pde_fg_columns,
+                        data=pde_fg_data,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                        style_cell_conditional=[
+                            {
+                                "if": {"column_id": "Requester Email"},
+                                "textAlign": "center",
+                                "whiteSpace": "normal",
+                                "height": "auto",
+                                "minWidth": "180px",
+                                "width": "auto",
+                            },
+                            {
+                                "if": {"column_id": "Project"},
+                                "textAlign": "center",
+                                "whiteSpace": "normal",
+                                "height": "auto",
+                                "minWidth": "320px",
+                                "width": "auto",
+                            },
+                        ],
+                        page_size=10,
+                        style_table={"overflowX": "auto"},
+                    ),
                 ],
             ),
         ],
@@ -2731,13 +2887,43 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 data=summary_drill_rows,
                                 style_header=PDE_STYLE_HEADER,
                                 style_cell=PDE_STYLE_CELL,
-                                style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                style_data_conditional=[
+                                    *PDE_STYLE_DATA_CONDITIONAL,
+                                    {
+                                        "if": {"filter_query": '{Role} = "Total" && {Item Text} = "Total"'},
+                                        "fontWeight": "700",
+                                        "backgroundColor": "#eaf2ff",
+                                    },
+                                ],
                                 page_size=10,
                                 style_table={"overflowX": "auto"},
                                 sort_action="native",
                                 filter_action="none",
                             )
                         )
+                    ),
+                    html.Div(
+                        className="drill-table-wrapper",
+                        style={"marginTop": "8px"},
+                        children=[
+                            html.H4("Total（跨所有分页汇总）", style={"margin": "0 0 8px 0"}),
+                            DataTable(
+                                id="role-item-mrp-total-summary",
+                                columns=summary_total_columns,
+                                data=summary_total_rows,
+                                style_header=PDE_STYLE_HEADER,
+                                style_cell=PDE_STYLE_CELL,
+                                style_data_conditional=[
+                                    {
+                                        "if": {"filter_query": '{Role} = "Total" && {Item Text} = "Total"'},
+                                        "fontWeight": "700",
+                                        "backgroundColor": "#eaf2ff",
+                                    },
+                                ],
+                                page_action="none",
+                                style_table={"overflowX": "auto"},
+                            ),
+                        ],
                     ),
                     html.Div(
                         className="drill-detail-panel",
@@ -3204,12 +3390,16 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("role-trend", "figure"),
         Output("pde-table", "columns"),
         Output("pde-table", "data"),
+        Output("pde-fg-table", "columns"),
+        Output("pde-fg-table", "data"),
         Output("drill-requester-filter", "options"),
         Output("drill-requester-filter", "value"),
         Output("drill-mrp-filter", "options"),
         Output("drill-mrp-filter", "value"),
         Output("role-item-mrp-summary", "columns"),
         Output("role-item-mrp-summary", "data"),
+        Output("role-item-mrp-total-summary", "columns"),
+        Output("role-item-mrp-total-summary", "data"),
         Output("hc-idp-monthly-table", "columns"),
         Output("hc-idp-monthly-table", "data"),
         Output("hc-idp-monthly-iya-table", "columns"),
@@ -3265,13 +3455,14 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             if any(option.get("value") == indicator for option in drill_mrp_options)
         ]
         role_fig = build_role_trend(monthly_requester, selected_role)
-        pde_columns, pde_records = build_pde_matrix(pde_alerts)
+        pde_columns, pde_records, pde_fg_columns, pde_fg_records = build_pde_tables(pde_alerts, request_details)
         drill_columns, drill_rows = build_role_item_project_summary(
             request_details,
             selected_drill_role,
             valid_requesters,
             valid_mrp_indicators,
         )
+        drill_total_columns, drill_total_rows = extract_role_item_project_total_row(drill_columns, drill_rows)
         hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
         hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
         hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
@@ -3323,12 +3514,16 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             role_fig,
             pde_columns,
             pde_records,
+            pde_fg_columns,
+            pde_fg_records,
             drill_requester_options,
             valid_requesters,
             drill_mrp_options,
             valid_mrp_indicators,
             drill_columns,
             drill_rows,
+            drill_total_columns,
+            drill_total_rows,
             hc_idp_columns,
             hc_idp_rows,
             hc_idp_iya_columns,
