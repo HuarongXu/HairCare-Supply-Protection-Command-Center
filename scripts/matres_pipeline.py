@@ -40,6 +40,11 @@ PROCESSED_FILES = {
     "production_data": "production_data_summary.csv",
     "production_data_by_level": "production_data_summary_by_level.csv",
 }
+PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS = {"2.1plannedorders", "2.2processorders"}
+PRODUCTION_VOL_OTHER_EXCLUSION_REASON = (
+    "Exclude 'Other' because it contains QM quantities already included in MTD; "
+    "keeping Other would double count production data."
+)
 UNKNOWN_ROLE = "Others"
 DETAIL_COLUMNS = [
     "Material Number",
@@ -771,10 +776,11 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
         category_col = pick_column(raw, ["categories / members"], ["categories"])
         plant_col = pick_column(raw, ["plant"], ["plant"])
         material_col = pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
         prev_perd_col = pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
         d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
-        if category_col is None or plant_col is None or material_col is None or prev_perd_col is None:
-            logging.warning("Production Vol report missing Category/Plant columns: %s", report_path)
+        if category_col is None or plant_col is None or material_col is None or mrp_elements_col is None or prev_perd_col is None:
+            logging.warning("Production Vol report missing required columns (Category/Plant/Material/MRP Elements): %s", report_path)
             continue
 
         month_col_map: Dict[str, str] = {}
@@ -793,7 +799,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
             logging.warning("Production Vol report has no monthly columns: %s", report_path)
             continue
 
-        select_cols = [category_col, plant_col, material_col, *month_col_map.keys()]
+        select_cols = [category_col, plant_col, material_col, mrp_elements_col, *month_col_map.keys()]
         if d_filter_col is not None and d_filter_col not in select_cols:
             select_cols.append(d_filter_col)
         working = raw[select_cols].copy()
@@ -801,6 +807,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
             category_col: "Category",
             plant_col: "Plant",
             material_col: "Material",
+            mrp_elements_col: "MRP Elements",
         }
         if d_filter_col is not None and d_filter_col in working.columns and d_filter_col != plant_col:
             rename_base[d_filter_col] = "_D_FILTER"
@@ -809,15 +816,27 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
         working["Category"] = working["Category"].fillna("").astype(str).str.strip()
         working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
         working["Material"] = working["Material"].fillna("").astype(str).str.strip()
+        working["MRP Elements"] = working["MRP Elements"].fillna("").astype(str).str.strip()
         if "_D_FILTER" in working.columns:
             working["_D_FILTER"] = working["_D_FILTER"].fillna("").astype(str).str.strip()
 
+        before_mrp_rows = len(working)
         working = working[
             working["Category"].str.replace(" ", "", regex=False).str.lower().eq("2.0production/receipts")
+            & working["MRP Elements"].str.replace(" ", "", regex=False).str.lower().isin(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS)
             & working["Plant"].ne("")
             & working["Material"].ne("")
             & (working["_D_FILTER"].ne("") if "_D_FILTER" in working.columns else True)
         ].copy()
+        removed_by_mrp = before_mrp_rows - len(working)
+        if removed_by_mrp > 0:
+            logging.info(
+                "Production Vol file %s removed %s rows by MRP Elements filter (%s). %s",
+                report_path,
+                removed_by_mrp,
+                sorted(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS),
+                PRODUCTION_VOL_OTHER_EXCLUSION_REASON,
+            )
         if working.empty:
             continue
 
@@ -1103,10 +1122,11 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
         category_col = pick_column(raw, ["categories / members"], ["categories"])
         plant_col = pick_column(raw, ["plant"], ["plant"])
         material_col = pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
         prev_perd_col = pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
         d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
-        if any(col is None for col in [category_col, plant_col, material_col, prev_perd_col]):
-            logging.warning("Production Vol detail report missing required columns in %s", report_path)
+        if any(col is None for col in [category_col, plant_col, material_col, mrp_elements_col, prev_perd_col]):
+            logging.warning("Production Vol detail report missing required columns (Category/Plant/Material/MRP Elements) in %s", report_path)
             continue
 
         month_col_map: Dict[str, str] = {}
@@ -1124,7 +1144,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
         if not month_col_map:
             continue
 
-        select_cols = [category_col, plant_col, material_col, *month_col_map.keys()]
+        select_cols = [category_col, plant_col, material_col, mrp_elements_col, *month_col_map.keys()]
         if d_filter_col is not None and d_filter_col not in select_cols:
             select_cols.append(d_filter_col)
 
@@ -1133,6 +1153,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
             category_col: "Category",
             plant_col: "Plant",
             material_col: "Material",
+            mrp_elements_col: "MRP Elements",
         }
         if d_filter_col is not None and d_filter_col in working.columns and d_filter_col != plant_col:
             rename_base[d_filter_col] = "_D_FILTER"
@@ -1141,15 +1162,27 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
         working["Category"] = working["Category"].fillna("").astype(str).str.strip()
         working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
         working["Material"] = working["Material"].fillna("").astype(str).str.strip()
+        working["MRP Elements"] = working["MRP Elements"].fillna("").astype(str).str.strip()
         if "_D_FILTER" in working.columns:
             working["_D_FILTER"] = working["_D_FILTER"].fillna("").astype(str).str.strip()
 
+        before_mrp_rows = len(working)
         working = working[
             working["Category"].str.replace(" ", "", regex=False).str.lower().eq("2.0production/receipts")
+            & working["MRP Elements"].str.replace(" ", "", regex=False).str.lower().isin(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS)
             & working["Plant"].ne("")
             & working["Material"].ne("")
             & (working["_D_FILTER"].ne("") if "_D_FILTER" in working.columns else True)
         ].copy()
+        removed_by_mrp = before_mrp_rows - len(working)
+        if removed_by_mrp > 0:
+            logging.info(
+                "Production Vol detail file %s removed %s rows by MRP Elements filter (%s). %s",
+                report_path,
+                removed_by_mrp,
+                sorted(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS),
+                PRODUCTION_VOL_OTHER_EXCLUSION_REASON,
+            )
         if working.empty:
             continue
 
