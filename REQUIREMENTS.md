@@ -139,12 +139,25 @@ Install already included in requirements.
 
 ### 10.5 Demand LBE Logic
 - Product line dimension in UI is displayed as `Prod Line` (Base / Promotion / Total).
-- Time window: **current quarter + next quarter** (6 months total).
+- Time window: **current quarter + next 2 quarters** (9 months total).
 - Current month value source:
 	- From `Weekly(TP)` sheet, using ER->LBE column and `Prod Line` bucket.
 	- Convert SU to MSU using `/1000`.
 - Non-current months value source:
 	- From `Monthly` sheet values (also normalized to MSU).
+
+### 10.11 Demand Data Window Rules
+- `TD Version Monthly Comparison`: 9 months (current quarter + next 2 quarters).
+- `Level2 GAP Details` / `GAP Difference Details`: 9 months aligned with the same quarter window.
+
+### 10.12 Production Volume Filtering & Month Rules
+- Production Vol base filter keeps:
+	- `Categories / Members = 2.0Production/Receipts`
+	- `Plant` non-empty
+	- `Material` non-empty
+	- `MRP Elements` only in `2.1Planned Orders` and `2.2Process Orders`
+- `Other` is excluded by design, because `Other` includes QM quantities already counted in MTD; keeping `Other` would double count.
+- Production Data month columns are **dynamic**: display all detected `YYYY-MM` months available in Production Vol source files (not fixed to 6 months).
 
 ### 10.6 Demand HS Logic
 - `Demand HS = Demand LBE + Supply Protection` by month.

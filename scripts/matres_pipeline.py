@@ -910,7 +910,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
     if not sorted_months:
         return pd.DataFrame(columns=base_columns)
 
-    month_window = sorted_months[:6]
+    month_window = sorted_months
     current_month = month_window[0]
     future_months = month_window[1:]
 
@@ -1260,7 +1260,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     )
 
     sorted_months = sort_month_values(month_labels)
-    month_window = sorted_months[:6]
+    month_window = sorted_months
     if not month_window:
         return pd.DataFrame(columns=base_columns)
 
@@ -1437,7 +1437,11 @@ def summarize_hc_idp_weekly_current_month_detail(report_path: Path, current_mont
     return grouped[["Prod Line", "APO Product", "Month", "Value"]]
 
 
-def summarize_hc_idp_monthly_from_report(report_path: Path, apply_past_shipment_filter: bool = False) -> pd.DataFrame:
+def summarize_hc_idp_monthly_from_report(
+    report_path: Path,
+    apply_past_shipment_filter: bool = False,
+    quarter_count: int = 2,
+) -> pd.DataFrame:
     if report_path is None:
         return pd.DataFrame(columns=["Prod Line AS", "Overall Result"])
 
@@ -1509,8 +1513,9 @@ def summarize_hc_idp_monthly_from_report(report_path: Path, apply_past_shipment_
     report_period = infer_hc_idp_report_period(report_path)
     quarter_start_month = ((current_period.month - 1) // 3) * 3 + 1
     quarter_start = pd.Period(f"{current_period.year}-{quarter_start_month:02d}", freq="M")
-    quarter_end_next = quarter_start + 5
-    target_periods = [quarter_start + i for i in range(6)]
+    quarter_month_count = max(int(quarter_count), 1) * 3
+    quarter_end_next = quarter_start + (quarter_month_count - 1)
+    target_periods = [quarter_start + i for i in range(quarter_month_count)]
     target_month_labels = [p.strftime("%Y-%m") for p in target_periods]
 
     quarter_window_columns: list[Any] = []
@@ -1616,7 +1621,11 @@ def summarize_hc_idp_monthly(root: Path) -> pd.DataFrame:
     if report_path is None:
         logging.warning("No HC IDP HANA TD Report file found under %s", root)
         return pd.DataFrame(columns=["Prod Line AS", "Overall Result"])
-    return summarize_hc_idp_monthly_from_report(report_path, apply_past_shipment_filter=True)
+    return summarize_hc_idp_monthly_from_report(
+        report_path,
+        apply_past_shipment_filter=True,
+        quarter_count=3,
+    )
 
 
 def build_td_validation_monthly_comparison(root: Path) -> pd.DataFrame:
@@ -1627,15 +1636,23 @@ def build_td_validation_monthly_comparison(root: Path) -> pd.DataFrame:
     previous_date, previous_path = reports[-2]
     current_date, current_path = reports[-1]
 
-    current_df = summarize_hc_idp_monthly_from_report(current_path, apply_past_shipment_filter=True)
-    previous_df = summarize_hc_idp_monthly_from_report(previous_path, apply_past_shipment_filter=True)
+    current_df = summarize_hc_idp_monthly_from_report(
+        current_path,
+        apply_past_shipment_filter=True,
+        quarter_count=3,
+    )
+    previous_df = summarize_hc_idp_monthly_from_report(
+        previous_path,
+        apply_past_shipment_filter=True,
+        quarter_count=3,
+    )
     if current_df.empty or previous_df.empty:
         return pd.DataFrame(columns=["Version", "Prod Line", "Total"])
 
     current_period = pd.Timestamp.today().to_period("M")
     quarter_start_month = ((current_period.month - 1) // 3) * 3 + 1
     quarter_start = pd.Period(f"{current_period.year}-{quarter_start_month:02d}", freq="M")
-    target_months = [(quarter_start + i).strftime("%Y-%m") for i in range(6)]
+    target_months = [(quarter_start + i).strftime("%Y-%m") for i in range(9)]
 
     def to_full_date(version_date: str) -> str:
         if isinstance(version_date, str) and re.fullmatch(r"\d{8}", version_date):
@@ -1938,7 +1955,7 @@ def build_td_validation_gap_details(root: Path, cfg: PipelineConfig) -> pd.DataF
     current_period = pd.Timestamp.today().to_period("M")
     quarter_start_month = ((current_period.month - 1) // 3) * 3 + 1
     quarter_start = pd.Period(f"{current_period.year}-{quarter_start_month:02d}", freq="M")
-    target_months = [(quarter_start + i).strftime("%Y-%m") for i in range(6)]
+    target_months = [(quarter_start + i).strftime("%Y-%m") for i in range(9)]
 
     current_detail = summarize_hc_idp_monthly_detail_from_report(
         current_path,

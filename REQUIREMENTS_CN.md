@@ -134,9 +134,22 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 
 ### 10.5 Demand LBE 逻辑
 - UI 维度显示名：`Prod Line`（Base / Promotion / Total）
-- 时间窗口：当前季度 + 下个季度（共 6 个月）
+- 时间窗口：当前季度 + 后续 2 个季度（共 9 个月）
 - 当前月取数：`Weekly(TP)` 的 ER->LBE，且 SU 转 MSU（/1000）
 - 非当前月取数：`Monthly`（同样标准化为 MSU）
+
+### 10.11 Demand Data 时间窗口规则
+- `TD Version Monthly Comparison`：9 个月（当前季度 + 后续 2 个季度）。
+- `Level2 GAP Details` / `GAP Difference Details`：同样按 9 个月窗口展示。
+
+### 10.12 Production Vol 筛选与月份规则
+- Production Vol 基础筛选条件：
+  - `Categories / Members = 2.0Production/Receipts`
+  - `Plant` 非空
+  - `Material` 非空
+  - `MRP Elements` 仅保留 `2.1Planned Orders` 与 `2.2Process Orders`
+- 业务口径上剔除 `Other`：因 `Other` 包含 QM，而 QM 已在 MTD 中统计；若保留会造成重复计算。
+- Production Data 月份列采用**动态展示**：按 Production Vol 实际存在的 `YYYY-MM` 月份全部展示，不再固定 6 个月。
 
 ### 10.6 Demand HS 逻辑
 - `Demand HS = Demand LBE + Supply Protection`（按月）
