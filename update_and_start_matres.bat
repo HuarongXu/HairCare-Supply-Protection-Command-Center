@@ -71,22 +71,66 @@ for /f "delims=" %%C in ('git log -1 --oneline') do set "LAST_COMMIT=%%C"
 echo [OK] Current commit: !LAST_COMMIT!
 
 REM ========== 5) Python / 虚拟环境 ==========
+REM Prefer "python" over "py" launcher to avoid stale registry entries
 set "PY_CMD="
-where py >nul 2>nul && set "PY_CMD=py -3"
-if not defined PY_CMD (
-  where python >nul 2>nul && set "PY_CMD=python"
+
+REM 5a) Try "python" first — most reliable when Python is in PATH
+where python >nul 2>nul
+if not errorlevel 1 (
+  python --version >nul 2>nul
+  if not errorlevel 1 set "PY_CMD=python"
 )
+
+REM 5b) Try "py -3" launcher as fallback
 if not defined PY_CMD (
-  echo [ERROR] 未找到 Python。
+  where py >nul 2>nul
+  if not errorlevel 1 (
+    py -3 --version >nul 2>nul
+    if not errorlevel 1 set "PY_CMD=py -3"
+  )
+)
+
+REM 5c) Scan common install locations as last resort
+if not defined PY_CMD (
+  for %%V in (313 312 311 310) do (
+    if not defined PY_CMD (
+      if exist "%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe" (
+        set "PY_CMD=%LOCALAPPDATA%\Programs\Python\Python%%V\python.exe"
+      )
+    )
+  )
+)
+
+if not defined PY_CMD (
+  echo [ERROR] 未找到 Python。请安装 Python 3.10+ 并加入 PATH。
+  echo [HINT] 下载地址: https://www.python.org/downloads/
   pause
   exit /b 1
 )
 
+echo [INFO] Using Python: %PY_CMD%
+%PY_CMD% --version
+
 set "VENV_DIR=.venv_%COMPUTERNAME%"
 if exist ".venv\Scripts\python.exe" set "VENV_DIR=.venv"
+
+REM Validate existing venv (may be broken after cross-machine copy)
+if exist "%VENV_DIR%\Scripts\python.exe" (
+  "%VENV_DIR%\Scripts\python.exe" --version >nul 2>nul
+  if errorlevel 1 (
+    echo [WARN] Existing %VENV_DIR% is invalid. Recreating...
+    rmdir /s /q "%VENV_DIR%"
+  )
+)
+
 if not exist "%VENV_DIR%\Scripts\python.exe" (
   echo [INFO] Creating venv: %VENV_DIR%
   %PY_CMD% -m venv "%VENV_DIR%"
+  if errorlevel 1 (
+    echo [ERROR] 创建虚拟环境失败。
+    pause
+    exit /b 1
+  )
 )
 
 call "%VENV_DIR%\Scripts\activate.bat"
