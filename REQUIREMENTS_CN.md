@@ -119,6 +119,36 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 - `matres_request_details.csv`
 - `level1_unmapped_materials.csv`
 - `hc_idp_monthly_summary.csv`
+- `td_version_monthly_comparison.csv`
+- `td_version_gap_details.csv`
+- `production_data_summary.csv`
+- `production_data_summary_by_level.csv`
+- `pipeline_progress.json`（Pipeline 运行进度文件）
+
+### 10.2.1 Pipeline 分阶段执行
+Pipeline 支持分阶段独立运行，4 个阶段互相独立：
+
+| 阶段 | 名称 | 依赖数据源 | 产出文件 |
+|------|------|-----------|----------|
+| `supply` | Supply Protection (MR) | MR 工作簿 | monthly_item, monthly_requester, monthly_level1, pde_alerts, request_details, level1_unmapped |
+| `demand` | Demand (HC IDP) | HC IDP 报表 | hc_idp_monthly |
+| `td` | TD Validation | HC IDP 报表 | td_validation, td_validation_gap_detail |
+| `production` | Production Data | Production Volume 文件 | production_data, production_data_by_level |
+
+CLI 用法：
+```powershell
+# 运行全部阶段
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py
+
+# 仅运行 demand 阶段
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py --stages demand
+
+# 运行多个阶段（逗号分隔）
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py --stages demand,td
+
+# 带进度文件（Dashboard 集成用）
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py --stages all --progress-file data/processed/pipeline_progress.json
+```
 
 ### 10.3 角色映射规则
 - 映射文件：`config/requester_roles.json`
@@ -165,13 +195,15 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 - 分母缺失或为 0 时显示 `-`
 
 ### 10.8 Demand IYA by quarter（季度）逻辑
-- 季度标签按当前季度月份缩写（如 `JFM`）
+- 季度标签按当前季度月份缩写（如 `AMJ`）
 - 行：`Base / Promotion / Total`
-- 列：
-  - `JFM LBE`：第一季度 LBE 合计
-  - `JFM HS`：第一季度 HS 合计
-  - `JFM LBE IYA`：第一季度 LBE / 去年同期 * 100
-  - `JFM HS IYA`：第一季度 HS / 去年同期 * 100
+- 拆分为两张表：
+  - **Demand System LBE By Quarter**：两个季度的 LBE MSU + IYA
+  - **Demand System LBE + Supply System Protection By Quarter**：两个季度的 DSL+SSP MSU + IYA
+- 列头简化：
+  - `AMJ MSU`：季度数值合计
+  - `AMJ IYA`：季度 IYA 百分比
+  - `JAS MSU` / `JAS IYA`：下季度同理
 
 ### 10.9 Demand Assumption 页面布局
 - 双列三行：
@@ -187,12 +219,15 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 
 ## 11）页面功能总览（最新）
 - `全局操作（页头）`
+  - `Run Pipeline & Refresh`：选择数据范围（All Data / Demand / Supply / TD / Production），一键运行 Pipeline 并刷新看板数据。
+  - **实时进度条**：Pipeline 运行期间显示当前阶段、完成百分比，按钮禁用防止重复操作。
   - `Backup Snapshot`：一键导出当前看板快照（Excel + CSV 历史目录）。
   - `Refresh Mail & Open HTML`：一键刷新周报邮件内容并在新标签页打开最新 HTML 预览。
+  - 每 15 分钟自动从 CSV 刷新数据（仅读取，不运行 Pipeline）。
 - `Demand Assumption`
-  - 包含 `Demand LBE`、`Demand LBE IYA`、`Demand HS`、`Demand HS IYA`。
+  - 包含 `Demand System LBE`、`Demand System LBE IYA`、`Demand System LBE + Supply System Protection`、`Demand System LBE + Supply System Protection IYA`。
   - Supply Protection 拆分为 `(PP + Base)` 与 `(HKTW + ESS)` 两块。
-  - 季度 IYA 拆分为当前季度与下季度两张表。
+  - 季度表拆分为 LBE 表和 DSL+SSP 表，各含两个季度数据，列头简化为 `AMJ MSU` / `AMJ IYA` / `JAS MSU` / `JAS IYA` 格式。
 - `Supply Protection`
   - KPI 卡片：总保护量 MSU、Item Text 数量、未来 7 天 PDE 预警。
   - Role 趋势图、Role-Item 汇总矩阵、Monthly Summary、Past Due Alerts。

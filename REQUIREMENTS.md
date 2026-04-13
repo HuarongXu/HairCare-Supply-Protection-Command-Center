@@ -124,6 +124,36 @@ Install already included in requirements.
 - `matres_request_details.csv`
 - `level1_unmapped_materials.csv`
 - `hc_idp_monthly_summary.csv`
+- `td_version_monthly_comparison.csv`
+- `td_version_gap_details.csv`
+- `production_data_summary.csv`
+- `production_data_summary_by_level.csv`
+- `pipeline_progress.json` (pipeline execution progress file)
+
+### 10.2.1 Staged Pipeline Execution
+The pipeline supports independent stage execution. Four stages can run separately:
+
+| Stage | Label | Data Source | Output Files |
+|-------|-------|------------|-------------|
+| `supply` | Supply Protection (MR) | MR Workbook | monthly_item, monthly_requester, monthly_level1, pde_alerts, request_details, level1_unmapped |
+| `demand` | Demand (HC IDP) | HC IDP Reports | hc_idp_monthly |
+| `td` | TD Validation | HC IDP Reports | td_validation, td_validation_gap_detail |
+| `production` | Production Data | Production Volume files | production_data, production_data_by_level |
+
+CLI usage:
+```powershell
+# Run all stages
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py
+
+# Run only demand stage
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py --stages demand
+
+# Run multiple stages (comma-separated)
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py --stages demand,td
+
+# With progress file (for dashboard integration)
+& ".venv\Scripts\python.exe" scripts\matres_pipeline.py --stages all --progress-file data/processed/pipeline_progress.json
+```
 
 ### 10.3 Role / Requester Mapping
 - Role mapping file: `config/requester_roles.json`.
@@ -173,13 +203,15 @@ Install already included in requirements.
 - If denominator is missing or zero, show `-`.
 
 ### 10.8 Demand IYA by quarter
-- Quarter label uses current quarter month initials (e.g., `JFM`).
+- Quarter label uses current quarter month initials (e.g., `AMJ`).
 - Rows: `Base`, `Promotion`, `Total`.
-- Columns:
-	- `JFM LBE`: quarter sum of Demand LBE
-	- `JFM HS`: quarter sum of Demand HS
-	- `JFM LBE IYA`: quarter LBE / previous-year same-quarter baseline * 100
-	- `JFM HS IYA`: quarter HS / previous-year same-quarter baseline * 100
+- Split into two tables:
+	- **Demand System LBE By Quarter**: LBE MSU + IYA for two quarters
+	- **Demand System LBE + Supply System Protection By Quarter**: DSL+SSP MSU + IYA for two quarters
+- Simplified column headers:
+	- `AMJ MSU`: quarter value total
+	- `AMJ IYA`: quarter IYA percentage
+	- `JAS MSU` / `JAS IYA`: next quarter follows same pattern
 
 ### 10.9 UI Layout Rules (Demand Assumption)
 - Two-column layout:
@@ -195,12 +227,15 @@ Install already included in requirements.
 
 ## 11) Dashboard Pages (Current)
 - `Global Header Actions`
+	- `Run Pipeline & Refresh`: select data scope (All Data / Demand / Supply / TD / Production), then one-click to run the pipeline and refresh dashboard data.
+	- **Live Progress Bar**: during pipeline execution, displays current stage name, completion percentage, and disables the button to prevent duplicate runs.
 	- `Backup Snapshot`: one-click export of current dashboard snapshot (Excel + CSV history folder).
 	- `Refresh Mail & Open HTML`: one-click regenerate weekly mail content and open the latest HTML preview in a new tab.
+	- Auto-refresh every 15 minutes (re-reads CSV only, does not re-run pipeline).
 - `Demand Assumption`
-	- Demand LBE / Demand LBE IYA / Demand HS / Demand HS IYA.
+	- Demand System LBE / Demand System LBE IYA / Demand System LBE + Supply System Protection / Demand System LBE + Supply System Protection IYA.
 	- Supply Protection split tables: `(PP + Base)` and `(HKTW + ESS)`.
-	- Quarter IYA split into two cards (current quarter and next quarter).
+	- Quarter tables split into LBE and DSL+SSP tables, each covering two quarters. Column headers simplified to `AMJ MSU` / `AMJ IYA` / `JAS MSU` / `JAS IYA` format.
 - `Supply Protection`
 	- KPI cards: total protection MSU / item count / PDE alerts (coming 7 days).
 	- Role trend chart and role-item matrix.

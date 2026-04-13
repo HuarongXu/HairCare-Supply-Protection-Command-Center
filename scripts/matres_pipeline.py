@@ -45,6 +45,16 @@ PRODUCTION_VOL_OTHER_EXCLUSION_REASON = (
     "Exclude 'Other' because it contains QM quantities already included in MTD; "
     "keeping Other would double count production data."
 )
+
+# ---------------------------------------------------------------------------
+# Pipeline stage definitions (for staged / partial execution)
+# ---------------------------------------------------------------------------
+PIPELINE_STAGES = {
+    "supply": "Supply Protection (MR)",
+    "demand": "Demand (HC IDP)",
+    "td": "TD Validation",
+    "production": "Production Data",
+}
 UNKNOWN_ROLE = "Others"
 DETAIL_COLUMNS = [
     "Material Number",
@@ -2408,6 +2418,167 @@ def append_history_snapshot(df: pd.DataFrame, cfg: PipelineConfig) -> None:
     logging.info("History snapshot updated (%s rows)", len(combined))
 
 
+# ---------------------------------------------------------------------------
+# Staged pipeline execution  ── individual stage runners
+# ---------------------------------------------------------------------------
+
+def _write_progress(progress_file: Optional[Path], data: dict) -> None:
+    """Write pipeline progress to a JSON file for dashboard polling."""
+    if progress_file is None:
+        return
+    progress_file.parent.mkdir(parents=True, exist_ok=True)
+    progress_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def _run_stage_supply(cfg: PipelineConfig) -> None:
+    """Read MR workbook → clean → produce all supply-side CSVs."""
+    df_raw = read_workbook(cfg)
+    df_clean = clean_dataframe(df_raw, cfg)
+    append_history_snapshot(df_clean, cfg)
+
+    monthly_item = summarize_monthly_by_item(df_clean)
+    write_processed_csv(monthly_item, cfg.processed_dir, PROCESSED_FILES["monthly_item"])
+
+    monthly_requester = summarize_monthly_by_requester_item(df_clean)
+    write_processed_csv(monthly_requester, cfg.processed_dir, PROCESSED_FILES["monthly_requester"])
+
+    mapping = read_level1_mapping(cfg)
+    monthly_level1 = summarize_monthly_by_first_level(df_clean, mapping, cfg)
+    write_processed_csv(monthly_level1, cfg.processed_dir, PROCESSED_FILES["monthly_level1"])
+
+    unmapped_report = build_level1_unmapped_report(df_clean, mapping, cfg)
+    write_processed_csv(unmapped_report, cfg.processed_dir, PROCESSED_FILES["level1_unmapped"])
+
+    pde_alerts = summarize_pde_alerts(df_clean)
+    write_processed_csv(pde_alerts, cfg.processed_dir, PROCESSED_FILES["pde_alerts"])
+
+    request_details = prepare_request_details(df_clean)
+    write_processed_csv(request_details, cfg.processed_dir, PROCESSED_FILES["request_details"])
+
+
+def _run_stage_demand(cfg: PipelineConfig) -> None:
+    """Read HC IDP reports → produce demand monthly summary CSV."""
+    hc_idp_monthly = summarize_hc_idp_monthly(cfg.data_base_dir)
+    write_processed_csv(hc_idp_monthly, cfg.processed_dir, PROCESSED_FILES["hc_idp_monthly"])
+
+
+def _run_stage_td(cfg: PipelineConfig) -> None:
+    """TD validation: current-vs-previous comparison + gap details."""
+    td_validation = build_td_validation_monthly_comparison(cfg.data_base_dir)
+    write_processed_csv(td_validation, cfg.processed_dir, PROCESSED_FILES["td_validation_monthly_compare"])
+
+    td_validation_detail = build_td_validation_gap_details(cfg.data_base_dir, cfg)
+    write_processed_csv(td_validation_detail, cfg.processed_dir, PROCESSED_FILES["td_validation_gap_detail"])
+
+
+def _run_stage_production(cfg: PipelineConfig) -> None:
+    """Build production data summaries (plant-level + by-level)."""
+    production_data = build_production_data_summary(cfg.production_data_dir, cfg)
+    write_processed_csv(production_data, cfg.processed_dir, PROCESSED_FILES["production_data"])
+
+    production_data_by_level = build_production_data_summary_by_level(cfg.production_data_dir, cfg)
+    write_processed_csv(production_data_by_level, cfg.processed_dir, PROCESSED_FILES["production_data_by_level"])
+
+
+_STAGE_RUNNERS = {
+    "supply": _run_stage_supply,
+    "demand": _run_stage_demand,
+    "td": _run_stage_td,
+    "production": _run_stage_production,
+}
+
+
+def run_pipeline_staged(
+    cfg: PipelineConfig,
+    stages: Optional[list] = None,
+    progress_file: Optional[Path] = None,
+) -> None:
+    """Run pipeline by stages with progress reporting.
+
+    Parameters
+    ----------
+    cfg : PipelineConfig
+    stages : list[str] | None
+        Stage names to run.  ``None`` or ``["all"]`` runs every stage.
+    progress_file : Path | None
+        If provided, a JSON file is kept up-to-date with execution progress
+        so the dashboard can show a live progress bar.
+    """
+    cfg.processed_dir.mkdir(parents=True, exist_ok=True)
+
+    if stages is None or "all" in stages:
+        stages = list(_STAGE_RUNNERS.keys())
+
+    valid_stages = [s for s in stages if s in _STAGE_RUNNERS]
+    if not valid_stages:
+        logging.warning("No valid stages specified: %s", stages)
+        return
+
+    total = len(valid_stages)
+    completed: list[str] = []
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    _write_progress(progress_file, {
+        "status": "running",
+        "stages_total": total,
+        "stages_done": 0,
+        "current_stage": valid_stages[0],
+        "current_stage_label": PIPELINE_STAGES.get(valid_stages[0], valid_stages[0]),
+        "completed_stages": [],
+        "error_message": None,
+        "started_at": started_at,
+        "finished_at": None,
+    })
+
+    for i, stage in enumerate(valid_stages):
+        label = PIPELINE_STAGES.get(stage, stage)
+        logging.info("▶ Running stage %d/%d: %s (%s)", i + 1, total, stage, label)
+
+        _write_progress(progress_file, {
+            "status": "running",
+            "stages_total": total,
+            "stages_done": i,
+            "current_stage": stage,
+            "current_stage_label": label,
+            "completed_stages": list(completed),
+            "error_message": None,
+            "started_at": started_at,
+            "finished_at": None,
+        })
+
+        try:
+            _STAGE_RUNNERS[stage](cfg)
+            completed.append(stage)
+            logging.info("✓ Stage '%s' completed", stage)
+        except Exception as exc:
+            logging.error("✗ Stage '%s' failed: %s", stage, exc)
+            _write_progress(progress_file, {
+                "status": "error",
+                "stages_total": total,
+                "stages_done": i,
+                "current_stage": stage,
+                "current_stage_label": label,
+                "completed_stages": list(completed),
+                "error_message": str(exc),
+                "started_at": started_at,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
+            raise
+
+    _write_progress(progress_file, {
+        "status": "completed",
+        "stages_total": total,
+        "stages_done": total,
+        "current_stage": None,
+        "current_stage_label": None,
+        "completed_stages": list(completed),
+        "error_message": None,
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    })
+    logging.info("Pipeline completed: %d/%d stages", total, total)
+
+
 def run_pipeline(cfg: PipelineConfig) -> None:
     cfg.processed_dir.mkdir(parents=True, exist_ok=True)
     df_raw = read_workbook(cfg)
@@ -2462,6 +2633,21 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_CONFIG_PATH,
         help="Path to pipeline config JSON",
     )
+    parser.add_argument(
+        "--stages",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated stages to run: supply,demand,td,production. "
+            "Default (omitted): run all stages."
+        ),
+    )
+    parser.add_argument(
+        "--progress-file",
+        type=Path,
+        default=None,
+        help="JSON file path for writing live progress (dashboard integration).",
+    )
     return parser.parse_args()
 
 
@@ -2469,7 +2655,13 @@ def main() -> None:
     configure_logging()
     args = parse_args()
     cfg = load_config(args.config)
-    run_pipeline(cfg)
+
+    if args.stages:
+        stages = [s.strip() for s in args.stages.split(",")]
+    else:
+        stages = None  # run all
+
+    run_pipeline_staged(cfg, stages=stages, progress_file=args.progress_file)
 
 
 if __name__ == "__main__":

@@ -131,8 +131,8 @@ fmt_iya = lambda x: f"{x:,.1f}%"
 
 next_quarter_line = f"""
         <li>
-          {next_quarter_tag} LBE: <span class=\"num\">{fmt_mmsu(next_q_lbe)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(next_q_lbe_iya)}</span>,
-          HS: <span class=\"num\">{fmt_mmsu(next_q_hs)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(next_q_hs_iya)}</span>.
+          {next_quarter_tag} System LBE: <span class=\"num\">{fmt_mmsu(next_q_lbe)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(next_q_lbe_iya)}</span>,
+          System LBE + Supply System Protection: <span class=\"num\">{fmt_mmsu(next_q_hs)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(next_q_hs_iya)}</span>.
         </li>
 """ if next_quarter_tag else ""
 
@@ -167,12 +167,12 @@ html = f"""<!doctype html>
       <ul>
         <li><span class=\"hl\">Demand</span></li>
         <li>
-          {month_text} LBE: <span class=\"num\">{fmt_msu(lbe_month)} msu</span> / IYA <span class=\"num\">{fmt_iya(lbe_iya_month)}</span>,
-          HS: <span class=\"num\">{fmt_msu(hs_month)} msu</span> / IYA <span class=\"num\">{fmt_iya(hs_iya_month)}</span>.
+          {month_text} System LBE: <span class=\"num\">{fmt_msu(lbe_month)} msu</span> / IYA <span class=\"num\">{fmt_iya(lbe_iya_month)}</span>,
+          System LBE + Supply System Protection: <span class=\"num\">{fmt_msu(hs_month)} msu</span> / IYA <span class=\"num\">{fmt_iya(hs_iya_month)}</span>.
         </li>
         <li>
-          {quarter_tag} LBE: <span class=\"num\">{fmt_mmsu(q_lbe)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(q_lbe_iya)}</span>,
-          HS: <span class=\"num\">{fmt_mmsu(q_hs)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(q_hs_iya)}</span>.
+          {quarter_tag} System LBE: <span class=\"num\">{fmt_mmsu(q_lbe)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(q_lbe_iya)}</span>,
+          System LBE + Supply System Protection: <span class=\"num\">{fmt_mmsu(q_hs)} Mmsu</span> / IYA <span class=\"num\">{fmt_iya(q_hs_iya)}</span>.
         </li>
 {next_quarter_line}
       </ul>

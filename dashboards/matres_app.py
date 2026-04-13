@@ -23,6 +23,13 @@ import plotly.graph_objects as go
 
 CONFIG_PATH = Path(os.getenv("MATRES_CONFIG", "config/config.json"))
 
+# ---------------------------------------------------------------------------
+# Pipeline integration paths
+# ---------------------------------------------------------------------------
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PIPELINE_SCRIPT = _PROJECT_ROOT / "scripts" / "matres_pipeline.py"
+_PIPELINE_PROGRESS_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_progress.json"
+
 
 @dataclass
 class AppConfig:
@@ -140,33 +147,129 @@ def load_historical_shipment_dataset(cfg: AppConfig) -> pd.DataFrame:
     return hist
 
 
-def load_data_bundle(cfg: AppConfig) -> Dict[str, Any]:
-    monthly_item = load_dataset(cfg.processed_dir, "monthly_msu_by_item_text.csv")
-    monthly_requester = load_dataset(cfg.processed_dir, "monthly_msu_by_requester_item.csv")
-    monthly_level1 = load_dataset(cfg.processed_dir, "monthly_msu_by_level1.csv")
-    hc_idp_monthly = load_dataset(cfg.processed_dir, "hc_idp_monthly_summary.csv")
-    production_data = load_dataset(cfg.processed_dir, "production_data_summary.csv")
-    production_data_by_level = load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv")
-    td_validation = load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv")
-    td_validation_detail = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
-    historical_shipment = load_historical_shipment_dataset(cfg)
-    pde_alerts = load_dataset(cfg.processed_dir, "pde_alerts.csv")
-    request_details_path = cfg.processed_dir / "matres_request_details.csv"
-    details_version = request_details_path.stat().st_mtime if request_details_path.exists() else None
+# ---------------------------------------------------------------------------
+# Refresh group definitions – each group maps to the data keys it covers.
+# "all" reloads everything (same as the old full refresh).
+# ---------------------------------------------------------------------------
+REFRESH_GROUPS: Dict[str, Dict[str, str]] = {
+    "all": {
+        "label": "All Data",
+        "description": "Reload everything",
+    },
+    "demand": {
+        "label": "Demand (HC IDP)",
+        "description": "hc_idp_monthly + historical_shipment",
+    },
+    "supply": {
+        "label": "Supply Protection (MR)",
+        "description": "monthly_item / requester / level1 / pde / details",
+    },
+    "td": {
+        "label": "TD Validation",
+        "description": "td_validation + td_validation_detail",
+    },
+    "production": {
+        "label": "Production Data",
+        "description": "production_data + production_data_by_level",
+    },
+}
 
-    return {
-        "monthly_item": monthly_item.to_dict("records"),
-        "monthly_requester": monthly_requester.to_dict("records"),
-        "monthly_level1": monthly_level1.to_dict("records"),
-        "hc_idp_monthly": hc_idp_monthly.to_dict("records"),
-        "production_data": production_data.to_dict("records"),
-        "production_data_by_level": production_data_by_level.to_dict("records"),
-        "td_validation": td_validation.to_dict("records"),
-        "td_validation_detail": td_validation_detail.to_dict("records"),
-        "historical_shipment": historical_shipment.to_dict("records"),
-        "pde_alerts": pde_alerts.to_dict("records"),
-        "request_details_version": details_version,
+# Which data‐bundle keys belong to which refresh group
+_REFRESH_GROUP_KEYS: Dict[str, List[str]] = {
+    "demand": ["hc_idp_monthly", "historical_shipment"],
+    "supply": [
+        "monthly_item",
+        "monthly_requester",
+        "monthly_level1",
+        "pde_alerts",
+    ],
+    "td": ["td_validation", "td_validation_detail"],
+    "production": ["production_data", "production_data_by_level"],
+}
+
+
+def _load_single_key(cfg: AppConfig, key: str) -> Any:
+    """Load a single data-bundle key from disk and return list-of-dicts."""
+    loaders: Dict[str, Any] = {
+        "monthly_item": lambda: load_dataset(cfg.processed_dir, "monthly_msu_by_item_text.csv"),
+        "monthly_requester": lambda: load_dataset(cfg.processed_dir, "monthly_msu_by_requester_item.csv"),
+        "monthly_level1": lambda: load_dataset(cfg.processed_dir, "monthly_msu_by_level1.csv"),
+        "hc_idp_monthly": lambda: load_dataset(cfg.processed_dir, "hc_idp_monthly_summary.csv"),
+        "production_data": lambda: load_dataset(cfg.processed_dir, "production_data_summary.csv"),
+        "production_data_by_level": lambda: load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv"),
+        "td_validation": lambda: load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv"),
+        "td_validation_detail": lambda: load_dataset(cfg.processed_dir, "td_version_gap_details.csv"),
+        "historical_shipment": lambda: load_historical_shipment_dataset(cfg),
+        "pde_alerts": lambda: load_dataset(cfg.processed_dir, "pde_alerts.csv"),
     }
+    loader = loaders.get(key)
+    if loader is None:
+        return []
+    return loader().to_dict("records")
+
+
+def load_data_bundle(cfg: AppConfig) -> Dict[str, Any]:
+    bundle: Dict[str, Any] = {}
+    for group_keys in _REFRESH_GROUP_KEYS.values():
+        for key in group_keys:
+            bundle[key] = _load_single_key(cfg, key)
+
+    request_details_path = cfg.processed_dir / "matres_request_details.csv"
+    bundle["request_details_version"] = (
+        request_details_path.stat().st_mtime if request_details_path.exists() else None
+    )
+    return bundle
+
+
+def load_data_bundle_partial(
+    cfg: AppConfig, existing: Dict[str, Any], group: str
+) -> Dict[str, Any]:
+    """Merge only the keys belonging to *group* into *existing*, return new bundle."""
+    if group == "all" or group not in _REFRESH_GROUP_KEYS:
+        return load_data_bundle(cfg)
+
+    merged = dict(existing)
+    for key in _REFRESH_GROUP_KEYS[group]:
+        merged[key] = _load_single_key(cfg, key)
+
+    # Always refresh request_details_version
+    request_details_path = cfg.processed_dir / "matres_request_details.csv"
+    merged["request_details_version"] = (
+        request_details_path.stat().st_mtime if request_details_path.exists() else None
+    )
+    return merged
+
+
+# ---------------------------------------------------------------------------
+# Pipeline subprocess helpers
+# ---------------------------------------------------------------------------
+
+def _start_pipeline_subprocess(group: str) -> None:
+    """Launch matres_pipeline.py in a detached subprocess.
+
+    *group* is one of the REFRESH_GROUPS keys (``all``, ``demand``, etc.).
+    Progress is written to ``_PIPELINE_PROGRESS_FILE`` by the pipeline.
+    """
+    cmd = [sys.executable, str(_PIPELINE_SCRIPT), "--progress-file", str(_PIPELINE_PROGRESS_FILE)]
+    if group and group != "all":
+        cmd += ["--stages", group]
+    logging.info("Starting pipeline subprocess: %s", " ".join(cmd))
+    subprocess.Popen(
+        cmd,
+        cwd=str(_PROJECT_ROOT),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _read_pipeline_progress() -> Optional[Dict[str, Any]]:
+    """Read current pipeline progress from the JSON file."""
+    try:
+        if _PIPELINE_PROGRESS_FILE.exists():
+            return json.loads(_PIPELINE_PROGRESS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        pass
+    return None
 
 
 REQUEST_DETAILS_CACHE: Dict[str, Any] = {"mtime": None, "data": pd.DataFrame()}
@@ -894,7 +997,7 @@ def build_pde_tables(
 
 def build_hc_idp_monthly_table(df: pd.DataFrame, as_percent: bool = False) -> Tuple[List[Dict], List[Dict]]:
     if df.empty:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
 
     working = df.copy()
     if "Prod Line" in working.columns:
@@ -919,7 +1022,10 @@ def build_hc_idp_monthly_table(df: pd.DataFrame, as_percent: bool = False) -> Tu
     for col in value_cols:
         working[col] = working[col].apply(format_value)
 
-    columns = [{"name": str(col), "id": str(col)} for col in working.columns]
+    columns = [
+        {"name": ("Overall" if str(col) == "Overall Result" else str(col)), "id": str(col)}
+        for col in working.columns
+    ]
     return columns, working.to_dict("records")
 
 
@@ -1408,7 +1514,7 @@ def build_demand_hs_table(hc_idp_df: pd.DataFrame, monthly_level1_df: pd.DataFra
 
 def build_demand_iya_table(current_df: pd.DataFrame, historical_df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
     if current_df.empty or historical_df.empty:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
 
     current = current_df.copy()
     if "Prod Line AS" not in current.columns:
@@ -1419,13 +1525,13 @@ def build_demand_iya_table(current_df: pd.DataFrame, historical_df: pd.DataFrame
 
     history = historical_df.copy()
     if "Prod Line AS" not in history.columns:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
     for col in [c for c in history.columns if c != "Prod Line AS"]:
         history[col] = pd.to_numeric(history[col], errors="coerce")
 
     month_cols = sorted([c for c in current.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
     if not month_cols:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
 
     history_lookup: Dict[Tuple[str, str], float] = {}
     for _, row in history.iterrows():
@@ -1500,20 +1606,21 @@ def build_demand_iya_by_quarter_table(
                 "month_labels": month_labels,
                 "prev_year_labels": prev_year_labels,
                 "col_lbe": f"{tag} LBE",
-                "col_hs": f"{tag} HS",
+                "col_hs": f"{tag} DSL+SSP",
                 "col_lbe_iya": f"{tag} LBE IYA",
-                "col_hs_iya": f"{tag} HS IYA",
+                "col_hs_iya": f"{tag} DSL+SSP IYA",
             }
         )
 
     columns = base_columns.copy()
     for spec in quarter_specs:
+        tag = spec["tag"]
         columns.extend(
             [
-                {"name": spec["col_lbe"], "id": spec["col_lbe"]},
-                {"name": spec["col_hs"], "id": spec["col_hs"]},
-                {"name": spec["col_lbe_iya"], "id": spec["col_lbe_iya"]},
-                {"name": spec["col_hs_iya"], "id": spec["col_hs_iya"]},
+                {"name": f"{tag} MSU", "id": spec["col_lbe"]},
+                {"name": f"{tag} MSU", "id": spec["col_hs"]},
+                {"name": f"{tag} IYA", "id": spec["col_lbe_iya"]},
+                {"name": f"{tag} IYA", "id": spec["col_hs_iya"]},
             ]
         )
 
@@ -1573,16 +1680,24 @@ def split_quarter_iya_tables(
 
     prod_line_col = columns[0]
     metric_cols = columns[1:]
-    first_quarter_cols = metric_cols[:4]
-    second_quarter_cols = metric_cols[4:8]
+    # Each quarter has 4 cols: {tag} LBE, {tag} HS, {tag} LBE IYA, {tag} HS IYA
+    # Q1 = metric_cols[0:4], Q2 = metric_cols[4:8]
+    q1_cols = metric_cols[:4]
+    q2_cols = metric_cols[4:8] if len(metric_cols) >= 8 else []
 
-    def quarter_title(quarter_cols: List[Dict[str, Any]], fallback: str) -> str:
-        if not quarter_cols:
-            return fallback
-        first_name = str(quarter_cols[0].get("name", "")).strip()
-        if first_name:
-            return f"Demand IYA by quarter - {first_name.split(' ')[0]}"
-        return fallback
+    # LBE table: Q1 LBE + Q1 LBE IYA + Q2 LBE + Q2 LBE IYA
+    lbe_cols: List[Dict[str, Any]] = []
+    if len(q1_cols) >= 4:
+        lbe_cols.extend([q1_cols[0], q1_cols[2]])
+    if len(q2_cols) >= 4:
+        lbe_cols.extend([q2_cols[0], q2_cols[2]])
+
+    # HS table: Q1 HS + Q1 HS IYA + Q2 HS + Q2 HS IYA
+    hs_cols: List[Dict[str, Any]] = []
+    if len(q1_cols) >= 4:
+        hs_cols.extend([q1_cols[1], q1_cols[3]])
+    if len(q2_cols) >= 4:
+        hs_cols.extend([q2_cols[1], q2_cols[3]])
 
     def build_subset(subset_cols: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         selected_cols = [prod_line_col, *subset_cols] if subset_cols else [prod_line_col]
@@ -1592,12 +1707,15 @@ def split_quarter_iya_tables(
             subset_rows.append({col_id: row.get(col_id, "-") for col_id in selected_ids if col_id})
         return selected_cols, subset_rows
 
-    q1_columns, q1_rows = build_subset(first_quarter_cols)
-    q2_columns, q2_rows = build_subset(second_quarter_cols)
+    lbe_columns, lbe_rows = build_subset(lbe_cols)
+    hs_columns, hs_rows = build_subset(hs_cols)
+
+    lbe_title = "Demand System LBE By Quarter"
+    hs_title = "Demand System LBE + Supply System Protection By Quarter"
 
     return (
-        (quarter_title(first_quarter_cols, "Demand IYA by quarter - Quarter 1"), q1_columns, q1_rows),
-        (quarter_title(second_quarter_cols, "Demand IYA by quarter - Quarter 2"), q2_columns, q2_rows),
+        (lbe_title, lbe_columns, lbe_rows),
+        (hs_title, hs_columns, hs_rows),
     )
 
 
@@ -1656,22 +1774,22 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     page_sheets["Project Details"].append(("01 Role x Item x Project", _snapshot_to_dataframe(drill_columns, drill_rows)))
 
     hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
-    page_sheets["Demand Assumption"].append(("01 Demand LBE", _snapshot_to_dataframe(hc_idp_columns, hc_idp_rows)))
+    page_sheets["Demand Assumption"].append(("01 Demand System LBE", _snapshot_to_dataframe(hc_idp_columns, hc_idp_rows)))
 
     hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
     hc_idp_hs_columns, hc_idp_hs_rows = build_hc_idp_monthly_table(hc_idp_hs_df)
-    page_sheets["Demand Assumption"].append(("02 Demand HS", _snapshot_to_dataframe(hc_idp_hs_columns, hc_idp_hs_rows)))
+    page_sheets["Demand Assumption"].append(("02 Demand System LBE + Supply System Protection", _snapshot_to_dataframe(hc_idp_hs_columns, hc_idp_hs_rows)))
 
     hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
-    page_sheets["Demand Assumption"].append(("03 Demand LBE IYA", _snapshot_to_dataframe(hc_idp_iya_columns, hc_idp_iya_rows)))
+    page_sheets["Demand Assumption"].append(("03 Demand System LBE IYA", _snapshot_to_dataframe(hc_idp_iya_columns, hc_idp_iya_rows)))
 
     hc_idp_hs_iya_columns, hc_idp_hs_iya_rows = build_demand_iya_table(hc_idp_hs_df, historical_shipment)
-    page_sheets["Demand Assumption"].append(("04 Demand HS IYA", _snapshot_to_dataframe(hc_idp_hs_iya_columns, hc_idp_hs_iya_rows)))
+    page_sheets["Demand Assumption"].append(("04 Demand System LBE + Supply System Protection IYA", _snapshot_to_dataframe(hc_idp_hs_iya_columns, hc_idp_hs_iya_rows)))
 
     quarter_columns, quarter_rows = build_demand_iya_by_quarter_table(hc_idp_monthly, hc_idp_hs_df, historical_shipment)
     (_, q1_columns, q1_rows), (_, q2_columns, q2_rows) = split_quarter_iya_tables(quarter_columns, quarter_rows)
-    page_sheets["Demand Assumption"].append(("05 Demand IYA Quarter 1", _snapshot_to_dataframe(q1_columns, q1_rows)))
-    page_sheets["Demand Assumption"].append(("06 Demand IYA Quarter 2", _snapshot_to_dataframe(q2_columns, q2_rows)))
+    page_sheets["Demand Assumption"].append(("05 Demand System LBE Quarter", _snapshot_to_dataframe(q1_columns, q1_rows)))
+    page_sheets["Demand Assumption"].append(("06 Demand SysLBE+SSP Quarter", _snapshot_to_dataframe(q2_columns, q2_rows)))
 
     level1_core_columns, level1_core_rows = build_first_level_summary(
         monthly_level1,
@@ -2971,7 +3089,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand LBE"),
+                            html.H3("Demand System LBE"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-monthly-table",
@@ -2990,7 +3108,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand LBE IYA"),
+                            html.H3("Demand System LBE IYA"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-monthly-iya-table",
@@ -3009,7 +3127,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand HS"),
+                            html.H3("Demand System LBE + Supply System Protection"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-hs-table",
@@ -3028,7 +3146,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand HS IYA"),
+                            html.H3("Demand System LBE + Supply System Protection IYA"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-hs-iya-table",
@@ -3319,6 +3437,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         className="page",
         children=[
             dcc.Interval(id="refresh-interval", interval=15 * 60 * 1000, n_intervals=0),
+            dcc.Interval(id="pipeline-progress-interval", interval=1000, n_intervals=0, disabled=True),
             dcc.Store(id="data-store", data=data_bundle),
             dcc.Store(id="details-version-store", data={"version": details_version}),
             html.Div(
@@ -3327,7 +3446,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         [
                             html.H1("Hair Care Supply Protection Command Center"),
-                            html.P("(MVP)"),
                         ]
                     ),
                     html.Div(
@@ -3336,10 +3454,93 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                             "flexDirection": "column",
                             "alignItems": "flex-end",
                             "gap": "8px",
-                            "minWidth": "260px",
+                            "minWidth": "320px",
                             "marginLeft": "auto",
                         },
                         children=[
+                            html.Div(
+                                style={"display": "flex", "gap": "6px", "alignItems": "center"},
+                                children=[
+                                    dcc.Dropdown(
+                                        id="refresh-scope-dropdown",
+                                        options=[
+                                            {"label": info["label"], "value": key}
+                                            for key, info in REFRESH_GROUPS.items()
+                                        ],
+                                        value="all",
+                                        clearable=False,
+                                        style={
+                                            "width": "200px",
+                                            "fontSize": "13px",
+                                            "fontFamily": GLOBAL_FONT_FAMILY,
+                                        },
+                                    ),
+                                    html.Button(
+                                        "Run Pipeline & Refresh",
+                                        id="manual-refresh-btn",
+                                        n_clicks=0,
+                                        style={"whiteSpace": "nowrap"},
+                                    ),
+                                ],
+                            ),
+                            # --- progress bar (hidden by default) ---
+                            html.Div(
+                                id="pipeline-progress-container",
+                                style={"display": "none", "width": "100%"},
+                                children=[
+                                    html.Div(
+                                        style={
+                                            "background": "#e5e7eb",
+                                            "borderRadius": "4px",
+                                            "height": "18px",
+                                            "overflow": "hidden",
+                                            "position": "relative",
+                                            "width": "100%",
+                                        },
+                                        children=[
+                                            html.Div(
+                                                id="pipeline-progress-fill",
+                                                style={
+                                                    "width": "0%",
+                                                    "height": "100%",
+                                                    "backgroundColor": "#3b82f6",
+                                                    "borderRadius": "4px",
+                                                    "transition": "width 0.4s ease",
+                                                },
+                                            ),
+                                            html.Span(
+                                                "0%",
+                                                id="pipeline-progress-pct",
+                                                style={
+                                                    "position": "absolute",
+                                                    "top": "0",
+                                                    "left": "50%",
+                                                    "transform": "translateX(-50%)",
+                                                    "fontSize": "11px",
+                                                    "lineHeight": "18px",
+                                                    "color": "#1f2937",
+                                                    "fontWeight": "600",
+                                                },
+                                            ),
+                                        ],
+                                    ),
+                                    html.Div(
+                                        "",
+                                        id="pipeline-progress-text",
+                                        style={
+                                            "fontSize": "12px",
+                                            "color": "#6b7280",
+                                            "marginTop": "2px",
+                                            "textAlign": "center",
+                                        },
+                                    ),
+                                ],
+                            ),
+                            html.Span(
+                                "",
+                                id="manual-refresh-status",
+                                style={"fontSize": "12px", "color": "#16a34a", "textAlign": "right"},
+                            ),
                             html.Button("Backup Snapshot", id="backup-snapshot-btn", n_clicks=0),
                             html.Span("", id="backup-snapshot-status", style={"fontSize": "13px", "color": "#334155", "textAlign": "right"}),
                             html.A(
@@ -3363,14 +3564,143 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
 
 
 def register_callbacks(app: Dash, cfg: AppConfig) -> None:
+
+    # ── unified refresh + pipeline progress callback ──────────────
     @app.callback(
         Output("data-store", "data"),
         Output("details-version-store", "data"),
+        Output("manual-refresh-status", "children"),
+        Output("pipeline-progress-interval", "disabled"),
+        Output("pipeline-progress-container", "style"),
+        Output("pipeline-progress-fill", "style"),
+        Output("pipeline-progress-pct", "children"),
+        Output("pipeline-progress-text", "children"),
+        Output("manual-refresh-btn", "disabled"),
         Input("refresh-interval", "n_intervals"),
+        Input("manual-refresh-btn", "n_clicks"),
+        Input("pipeline-progress-interval", "n_intervals"),
+        State("refresh-scope-dropdown", "value"),
+        State("data-store", "data"),
+        prevent_initial_call=True,
     )
-    def refresh_data(_):
+    def refresh_data(n_intervals, n_clicks, progress_ticks, scope, existing_data):
+        from dash import ctx
+
+        trigger = ctx.triggered_id
+        _FILL_BASE = {
+            "height": "100%",
+            "backgroundColor": "#3b82f6",
+            "borderRadius": "4px",
+            "transition": "width 0.4s ease",
+        }
+        _HIDE = {"display": "none", "width": "100%"}
+        _SHOW = {"display": "block", "width": "100%"}
+
+        # ── 1) Manual click → launch pipeline subprocess ──
+        if trigger == "manual-refresh-btn":
+            group = scope or "all"
+            _start_pipeline_subprocess(group)
+            label = REFRESH_GROUPS.get(group, {}).get("label", group)
+            ts = datetime.now().strftime("%H:%M:%S")
+            return (
+                dash.no_update,                        # data-store (unchanged while running)
+                dash.no_update,                        # details-version-store
+                f"⏳ Pipeline started at {ts} ({label})",
+                False,                                 # enable progress-interval
+                _SHOW,                                 # show progress container
+                {**_FILL_BASE, "width": "5%"},         # initial fill
+                "0%",                                  # pct label
+                f"Preparing {label} …",                # text
+                True,                                  # disable button while running
+            )
+
+        # ── 2) Progress polling tick ──
+        if trigger == "pipeline-progress-interval":
+            progress = _read_pipeline_progress()
+
+            if progress is None:
+                return (
+                    dash.no_update, dash.no_update, dash.no_update,
+                    False, _SHOW,
+                    {**_FILL_BASE, "width": "5%"}, "…",
+                    "Waiting for pipeline to start …",
+                    True,
+                )
+
+            status = progress.get("status", "unknown")
+            done = progress.get("stages_done", 0)
+            total = max(progress.get("stages_total", 1), 1)
+            pct = int(done / total * 100)
+            current_label = progress.get("current_stage_label", "")
+
+            if status == "running":
+                return (
+                    dash.no_update, dash.no_update, dash.no_update,
+                    False, _SHOW,
+                    {**_FILL_BASE, "width": f"{max(pct, 5)}%"},
+                    f"{pct}%",
+                    f"Running: {current_label} ({done}/{total})",
+                    True,
+                )
+
+            if status == "completed":
+                # Pipeline finished → reload data from new CSVs
+                bundle = load_data_bundle(cfg)
+                ts = datetime.now().strftime("%H:%M:%S")
+                completed_stages = progress.get("completed_stages", [])
+                labels = ", ".join(
+                    REFRESH_GROUPS.get(s, {}).get("label", s) for s in completed_stages
+                )
+                return (
+                    bundle,
+                    {"version": bundle.get("request_details_version")},
+                    f"✓ Pipeline completed at {ts} — {labels}",
+                    True,                              # stop polling
+                    _HIDE,                             # hide progress bar
+                    {**_FILL_BASE, "width": "100%"},
+                    "100%",
+                    "",
+                    False,                             # re-enable button
+                )
+
+            if status == "error":
+                error_msg = progress.get("error_message", "Unknown error")
+                failed = progress.get("current_stage_label", "")
+                ts = datetime.now().strftime("%H:%M:%S")
+                return (
+                    dash.no_update, dash.no_update,
+                    f"✗ Pipeline failed at {ts} ({failed}): {error_msg}",
+                    True,                              # stop polling
+                    _HIDE,
+                    {**_FILL_BASE, "width": "0%", "backgroundColor": "#ef4444"},
+                    "",
+                    "",
+                    False,
+                )
+
+            # unknown status – keep polling
+            return (
+                dash.no_update, dash.no_update, dash.no_update,
+                False, _SHOW,
+                {**_FILL_BASE, "width": "5%"}, "…",
+                "Checking pipeline …",
+                True,
+            )
+
+        # ── 3) Auto-refresh (15-min interval) → just reload CSVs ──
         bundle = load_data_bundle(cfg)
-        return bundle, {"version": bundle.get("request_details_version")}
+        ts = datetime.now().strftime("%H:%M:%S")
+        return (
+            bundle,
+            {"version": bundle.get("request_details_version")},
+            f"Auto-refreshed at {ts}",
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
 
     @app.callback(
         Output("metric-total-msu", "children"),
