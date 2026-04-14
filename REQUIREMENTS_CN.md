@@ -218,6 +218,37 @@ CLI 用法：
 - IYA 表显示百分比
 
 ## 11）页面功能总览（最新）
+
+### 11.0 Admin Panel（`/admin`）
+后台管理面板，密码保护（默认密码在 `config/config.json` 的 `admin_password` 字段，当前为 `HR`）。
+
+包含 5 张功能卡片：
+
+| 卡片 | 功能 | 说明 |
+|------|------|------|
+| 1. Run Pipeline & Refresh | 选择数据范围 + 一键运行 Pipeline | 实时进度条显示阶段和百分比 |
+| 2. Backup Snapshot | 导出看板快照 | Excel + CSV 存入 `data/history/dashboard_snapshots/` |
+| 3. Weekly Mail Preview | 刷新周报邮件 | 在新标签页打开 HTML 预览 |
+| 4. Update & Restart | 远程更新代码并重启 | git pull → pip install → 自动重启 → 自动运行 Pipeline |
+| 5. Master Data Update | 扫描缺失主数据 | 扫描 Seg 缺失 + SU Factor 缺失，支持导出 Excel |
+
+#### 11.0.1 Master Data Update 详细说明
+- **Scan Missing Data**：扫描 Production Volume 报表中所有物料，检查两类缺失：
+  - **Seg 缺失**：物料代码在 Level1 映射文件（`HairCare Code List By Seg_Update Version.xlsx`）中找不到
+  - **SU Factor 缺失**：WIP 物料代码在 Parameter 文件中没有对应的 9 字头 SU 映射
+- **Data Source 列**：标注每个物料在哪个数据源有实际数据
+  - `Production Data`：在 Production Vol 报表中有非零月度数据
+  - `Demand Data`：在 TD 版本差异明细（`td_version_gap_details.csv`）中有非零数据
+  - `Production Data / Demand Data`：两个数据源都有数据
+- **过滤逻辑**：仅显示至少在一个数据源中有实际数据的物料（排除无数据的僵尸物料）
+- **Export to Excel**：导出到 `data/history/master_data_reports/master_data_update_{timestamp}.xlsx`
+
+#### 11.0.2 Update & Restart 详细说明
+- 执行流程：`git pull origin main` → `pip install -r requirements.txt` → 写入启动标记文件 → `os.execv()` 重启进程
+- 重启后自动运行全量 Pipeline
+- **注意**：如从 VS Code 终端启动应用后使用此功能，可能因终端断开导致新进程失败。建议从 BAT 文件启动时使用此功能。
+
+### 11.1 Dashboard 页面
 - `全局操作（页头）`
   - `Run Pipeline & Refresh`：选择数据范围（All Data / Demand / Supply / TD / Production），一键运行 Pipeline 并刷新看板数据。
   - **实时进度条**：Pipeline 运行期间显示当前阶段、完成百分比，按钮禁用防止重复操作。

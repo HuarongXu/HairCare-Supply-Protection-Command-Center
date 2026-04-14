@@ -225,7 +225,38 @@ CLI usage:
 - Demand numeric tables (`Demand LBE`, `Demand HS`) display integers (no decimals).
 - IYA tables display percentages.
 
-## 11) Dashboard Pages (Current)
+## 11) Dashboard Pages & Admin Panel (Current)
+
+### 11.0 Admin Panel (`/admin`)
+Password-protected admin panel (password in `config/config.json` field `admin_password`, default: `HR`).
+
+5 management cards:
+
+| Card | Function | Description |
+|------|----------|-------------|
+| 1. Run Pipeline & Refresh | Select scope + run pipeline | Live progress bar with stage name and percentage |
+| 2. Backup Snapshot | Export dashboard snapshot | Excel + CSV saved to `data/history/dashboard_snapshots/` |
+| 3. Weekly Mail Preview | Regenerate weekly mail | Opens HTML preview in new tab |
+| 4. Update & Restart | Remote code update + restart | git pull → pip install → auto-restart → auto-run pipeline |
+| 5. Master Data Update | Scan missing master data | Scans Seg mapping + SU Factor gaps, supports Excel export |
+
+#### 11.0.1 Master Data Update Details
+- **Scan Missing Data**: Scans all materials in Production Volume reports for two types of missing data:
+  - **Seg 缺失 (Missing Segment)**: Material code not found in Level1 mapping file (`HairCare Code List By Seg_Update Version.xlsx`)
+  - **SU Factor**: WIP material code has no matching 9-prefix SU mapping in Parameter file
+- **Data Source column**: Indicates which data source has actual data for each material:
+  - `Production Data`: non-zero monthly values in Production Vol reports
+  - `Demand Data`: non-zero values in TD version gap details (`td_version_gap_details.csv`)
+  - `Production Data / Demand Data`: both sources have data
+- **Filtering**: Only materials with data in at least one source are shown (excludes zero-volume inactive materials)
+- **Export to Excel**: Saves to `data/history/master_data_reports/master_data_update_{timestamp}.xlsx`
+
+#### 11.0.2 Update & Restart Details
+- Workflow: `git pull origin main` → `pip install -r requirements.txt` → write startup flag → `os.execv()` process restart
+- After restart, full pipeline runs automatically
+- **Note**: If the app was started from VS Code terminal, this feature may fail due to terminal disconnect. Recommended to use when app is launched from BAT file.
+
+### 11.1 Dashboard Pages
 - `Global Header Actions`
 	- `Run Pipeline & Refresh`: select data scope (All Data / Demand / Supply / TD / Production), then one-click to run the pipeline and refresh dashboard data.
 	- **Live Progress Bar**: during pipeline execution, displays current stage name, completion percentage, and disables the button to prevent duplicate runs.

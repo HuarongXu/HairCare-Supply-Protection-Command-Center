@@ -1,0 +1,1565 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hair Care Supply Protection Command Center — 用户指南</title>
+
+    <!-- === FONTS === -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;700;900&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+    <style>
+        /* === RESET & BASE === */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            /* --- Color Palette --- */
+            --bg-body: #f0f2f5;
+            --bg-sidebar: #0f172a;
+            --bg-sidebar-hover: #1e293b;
+            --bg-card: #ffffff;
+            --bg-hero: linear-gradient(135deg, #1e3a5f 0%, #0f172a 40%, #1a1a2e 100%);
+            --bg-code: #1e293b;
+            --bg-tag: #e0f2fe;
+            --bg-highlight: #fef9c3;
+            --bg-search: rgba(255,255,255,0.08);
+
+            --text-primary: #1e293b;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --text-on-dark: #e2e8f0;
+            --text-on-hero: #ffffff;
+            --text-link: #2563eb;
+
+            --accent-blue: #2563eb;
+            --accent-cyan: #06b6d4;
+            --accent-green: #16a34a;
+            --accent-amber: #f59e0b;
+            --accent-red: #dc2626;
+            --accent-purple: #7c3aed;
+
+            --border-light: #e2e8f0;
+            --border-card: rgba(0,0,0,0.06);
+
+            --shadow-card: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+            --shadow-card-hover: 0 10px 25px rgba(0,0,0,0.08);
+            --shadow-sidebar: 4px 0 20px rgba(0,0,0,0.15);
+
+            --sidebar-width: 280px;
+            --header-height: 56px;
+
+            --font-display: 'Space Grotesk', 'Noto Sans SC', sans-serif;
+            --font-body: 'Noto Sans SC', 'Space Grotesk', sans-serif;
+            --font-mono: 'JetBrains Mono', monospace;
+
+            --radius-sm: 6px;
+            --radius-md: 10px;
+            --radius-lg: 16px;
+        }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: var(--font-body);
+            color: var(--text-primary);
+            background: var(--bg-body);
+            line-height: 1.7;
+            font-size: 15px;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        /* === SIDEBAR === */
+        .sidebar {
+            position: fixed;
+            top: 0; left: 0;
+            width: var(--sidebar-width);
+            height: 100vh;
+            background: var(--bg-sidebar);
+            color: var(--text-on-dark);
+            overflow-y: auto;
+            z-index: 100;
+            box-shadow: var(--shadow-sidebar);
+            display: flex;
+            flex-direction: column;
+            transition: transform 0.3s ease;
+        }
+
+        .sidebar-header {
+            padding: 20px 18px 14px;
+            border-bottom: 1px solid rgba(255,255,255,0.08);
+            flex-shrink: 0;
+        }
+
+        .sidebar-header h2 {
+            font-family: var(--font-display);
+            font-size: 16px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+            color: #ffffff;
+            line-height: 1.3;
+        }
+
+        .sidebar-header .subtitle {
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-top: 4px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        /* --- Search Box --- */
+        .search-box {
+            padding: 12px 18px;
+            flex-shrink: 0;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 9px 12px 9px 36px;
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: var(--radius-sm);
+            background: var(--bg-search);
+            color: #ffffff;
+            font-size: 13px;
+            font-family: var(--font-body);
+            outline: none;
+            transition: border-color 0.2s, background 0.2s;
+        }
+
+        .search-box input::placeholder { color: rgba(255,255,255,0.4); }
+        .search-box input:focus {
+            border-color: var(--accent-cyan);
+            background: rgba(255,255,255,0.12);
+        }
+
+        .search-box .search-icon {
+            position: absolute;
+            left: 30px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: rgba(255,255,255,0.4);
+            font-size: 14px;
+            pointer-events: none;
+        }
+
+        .search-box { position: relative; }
+
+        .search-results-count {
+            font-size: 11px;
+            color: var(--accent-cyan);
+            padding: 0 18px 8px;
+            display: none;
+        }
+
+        /* --- Nav Links --- */
+        .sidebar-nav {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px 0;
+        }
+
+        .sidebar-nav a {
+            display: block;
+            padding: 8px 18px 8px 22px;
+            color: var(--text-on-dark);
+            text-decoration: none;
+            font-size: 13.5px;
+            line-height: 1.5;
+            border-left: 3px solid transparent;
+            transition: all 0.15s;
+        }
+
+        .sidebar-nav a:hover {
+            background: var(--bg-sidebar-hover);
+            color: #ffffff;
+        }
+
+        .sidebar-nav a.active {
+            border-left-color: var(--accent-cyan);
+            color: var(--accent-cyan);
+            background: rgba(6,182,212,0.08);
+            font-weight: 500;
+        }
+
+        .sidebar-nav .nav-group-title {
+            display: block;
+            padding: 16px 18px 6px 18px;
+            font-size: 10px;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: var(--text-muted);
+            font-weight: 600;
+            cursor: default;
+        }
+
+        .sidebar-nav a.sub-link {
+            padding-left: 36px;
+            font-size: 12.5px;
+            color: rgba(255,255,255,0.65);
+        }
+
+        .sidebar-nav a.sub-link:hover { color: #ffffff; }
+        .sidebar-nav a.sub-link.active { color: var(--accent-cyan); }
+
+        /* === MAIN CONTENT === */
+        .main {
+            margin-left: var(--sidebar-width);
+            min-height: 100vh;
+        }
+
+        /* --- Hero --- */
+        .hero {
+            background: var(--bg-hero);
+            color: var(--text-on-hero);
+            padding: 80px 48px 60px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: -50%; right: -20%;
+            width: 600px; height: 600px;
+            background: radial-gradient(circle, rgba(6,182,212,0.12) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .hero::after {
+            content: '';
+            position: absolute;
+            bottom: -30%; left: -10%;
+            width: 400px; height: 400px;
+            background: radial-gradient(circle, rgba(37,99,235,0.1) 0%, transparent 70%);
+            pointer-events: none;
+        }
+
+        .hero h1 {
+            font-family: var(--font-display);
+            font-size: clamp(28px, 4vw, 44px);
+            font-weight: 900;
+            letter-spacing: -1px;
+            line-height: 1.15;
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero h1 span {
+            display: block;
+            background: linear-gradient(90deg, var(--accent-cyan), #60a5fa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero p {
+            max-width: 600px;
+            font-size: 16px;
+            color: rgba(255,255,255,0.75);
+            margin-top: 16px;
+            line-height: 1.7;
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero-badges {
+            display: flex;
+            gap: 8px;
+            margin-top: 24px;
+            flex-wrap: wrap;
+            position: relative;
+            z-index: 1;
+        }
+
+        .hero-badge {
+            background: rgba(255,255,255,0.1);
+            border: 1px solid rgba(255,255,255,0.15);
+            color: rgba(255,255,255,0.9);
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+            backdrop-filter: blur(4px);
+        }
+
+        /* --- Content Area --- */
+        .content {
+            max-width: 900px;
+            padding: 40px 48px 80px;
+        }
+
+        /* --- Sections --- */
+        .section {
+            margin-bottom: 48px;
+            scroll-margin-top: 24px;
+        }
+
+        .section h2 {
+            font-family: var(--font-display);
+            font-size: 26px;
+            font-weight: 700;
+            color: var(--text-primary);
+            letter-spacing: -0.5px;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid var(--accent-blue);
+            display: inline-block;
+        }
+
+        .section h3 {
+            font-family: var(--font-display);
+            font-size: 19px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin: 28px 0 12px;
+        }
+
+        .section h4 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin: 20px 0 8px;
+        }
+
+        .section p {
+            color: var(--text-secondary);
+            margin-bottom: 12px;
+        }
+
+        .section ul, .section ol {
+            margin: 8px 0 16px 20px;
+            color: var(--text-secondary);
+        }
+
+        .section li { margin-bottom: 6px; }
+
+        /* --- Cards --- */
+        .card {
+            background: var(--bg-card);
+            border-radius: var(--radius-md);
+            border: 1px solid var(--border-card);
+            box-shadow: var(--shadow-card);
+            padding: 24px;
+            margin-bottom: 16px;
+            transition: box-shadow 0.2s;
+        }
+
+        .card:hover { box-shadow: var(--shadow-card-hover); }
+
+        .card-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 16px;
+            margin: 16px 0;
+        }
+
+        .card-icon {
+            width: 40px; height: 40px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            margin-bottom: 12px;
+            flex-shrink: 0;
+        }
+
+        .card h4 {
+            font-family: var(--font-display);
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: var(--text-primary);
+        }
+
+        .card p { font-size: 13.5px; color: var(--text-secondary); margin: 0; }
+
+        /* --- Tables (reusable) --- */
+        .doc-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 14px 0 20px;
+            font-size: 13.5px;
+        }
+
+        .doc-table th {
+            background: #f8fafc;
+            text-align: left;
+            padding: 10px 14px;
+            font-weight: 600;
+            border-bottom: 2px solid var(--border-light);
+            color: var(--text-primary);
+            font-size: 12.5px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .doc-table td {
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border-light);
+            color: var(--text-secondary);
+            vertical-align: top;
+        }
+
+        .doc-table tr:last-child td { border-bottom: none; }
+        .doc-table tr:hover td { background: #f8fafc; }
+
+        /* --- Code Blocks --- */
+        code {
+            font-family: var(--font-mono);
+            font-size: 13px;
+            background: #f1f5f9;
+            color: var(--accent-blue);
+            padding: 2px 6px;
+            border-radius: 4px;
+        }
+
+        pre {
+            background: var(--bg-code);
+            color: #e2e8f0;
+            padding: 16px 20px;
+            border-radius: var(--radius-md);
+            overflow-x: auto;
+            margin: 12px 0 20px;
+            font-family: var(--font-mono);
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        pre code {
+            background: none;
+            color: inherit;
+            padding: 0;
+        }
+
+        /* --- Tags / Badges --- */
+        .tag {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 11.5px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+        }
+
+        .tag-blue { background: #dbeafe; color: #1e40af; }
+        .tag-green { background: #dcfce7; color: #166534; }
+        .tag-amber { background: #fef3c7; color: #92400e; }
+        .tag-red { background: #fee2e2; color: #991b1b; }
+        .tag-purple { background: #ede9fe; color: #5b21b6; }
+        .tag-cyan { background: #cffafe; color: #155e75; }
+
+        /* --- Callout Boxes --- */
+        .callout {
+            padding: 16px 20px;
+            border-radius: var(--radius-md);
+            margin: 16px 0;
+            font-size: 14px;
+            line-height: 1.6;
+            display: flex;
+            gap: 12px;
+        }
+
+        .callout-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
+
+        .callout-info {
+            background: #eff6ff;
+            border-left: 4px solid var(--accent-blue);
+            color: #1e40af;
+        }
+
+        .callout-warn {
+            background: #fffbeb;
+            border-left: 4px solid var(--accent-amber);
+            color: #92400e;
+        }
+
+        .callout-success {
+            background: #f0fdf4;
+            border-left: 4px solid var(--accent-green);
+            color: #166534;
+        }
+
+        .callout-danger {
+            background: #fef2f2;
+            border-left: 4px solid var(--accent-red);
+            color: #991b1b;
+        }
+
+        /* --- Step List --- */
+        .step-list {
+            counter-reset: step-counter;
+            list-style: none;
+            margin: 16px 0;
+            padding: 0;
+        }
+
+        .step-list li {
+            counter-increment: step-counter;
+            position: relative;
+            padding: 16px 16px 16px 56px;
+            margin-bottom: 12px;
+            background: var(--bg-card);
+            border-radius: var(--radius-md);
+            box-shadow: var(--shadow-card);
+        }
+
+        .step-list li::before {
+            content: counter(step-counter);
+            position: absolute;
+            left: 16px;
+            top: 16px;
+            width: 28px;
+            height: 28px;
+            background: var(--accent-blue);
+            color: #ffffff;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: var(--font-display);
+            font-weight: 700;
+            font-size: 13px;
+        }
+
+        .step-list li strong { color: var(--text-primary); }
+
+        /* --- Flow Diagram --- */
+        .flow {
+            display: flex;
+            align-items: center;
+            gap: 0;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+
+        .flow-step {
+            background: var(--bg-card);
+            border: 2px solid var(--border-light);
+            border-radius: var(--radius-md);
+            padding: 12px 20px;
+            font-size: 13px;
+            font-weight: 500;
+            text-align: center;
+            white-space: nowrap;
+        }
+
+        .flow-arrow {
+            color: var(--text-muted);
+            font-size: 20px;
+            padding: 0 6px;
+        }
+
+        /* --- Search Highlight --- */
+        mark.search-highlight {
+            background: var(--bg-highlight);
+            color: inherit;
+            padding: 1px 3px;
+            border-radius: 3px;
+            box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.3);
+        }
+
+        .search-hidden { display: none !important; }
+
+        /* --- Keyboard Shortcut Badge --- */
+        kbd {
+            display: inline-block;
+            padding: 2px 7px;
+            border: 1px solid #d1d5db;
+            border-radius: 4px;
+            background: #f9fafb;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--text-secondary);
+            box-shadow: 0 1px 0 #d1d5db;
+        }
+
+        /* --- Mobile Toggle --- */
+        .sidebar-toggle {
+            display: none;
+            position: fixed;
+            top: 12px; left: 12px;
+            z-index: 200;
+            background: var(--bg-sidebar);
+            color: #ffffff;
+            border: none;
+            width: 40px; height: 40px;
+            border-radius: 8px;
+            font-size: 20px;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+
+        /* --- Responsive --- */
+        @media (max-width: 900px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.open { transform: translateX(0); }
+            .sidebar-toggle { display: flex; align-items: center; justify-content: center; }
+            .main { margin-left: 0; }
+            .hero { padding: 60px 24px 40px; }
+            .content { padding: 24px 20px 60px; }
+            .card-grid { grid-template-columns: 1fr; }
+        }
+
+        /* --- Print --- */
+        @media print {
+            .sidebar, .sidebar-toggle { display: none !important; }
+            .main { margin-left: 0; }
+            .hero { padding: 30px; }
+            .content { padding: 20px; }
+        }
+
+        /* --- Scroll indicator on sidebar --- */
+        .sidebar-nav::-webkit-scrollbar { width: 4px; }
+        .sidebar-nav::-webkit-scrollbar-track { background: transparent; }
+        .sidebar-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 4px; }
+
+        /* --- Animations --- */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .reveal {
+            opacity: 0;
+            transform: translateY(20px);
+        }
+
+        .reveal.visible {
+            animation: fadeInUp 0.5s ease forwards;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .reveal { opacity: 1; transform: none; }
+            .reveal.visible { animation: none; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- === MOBILE SIDEBAR TOGGLE === -->
+<button class="sidebar-toggle" id="sidebarToggle" aria-label="Toggle navigation">☰</button>
+
+<!-- === SIDEBAR === -->
+<aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+        <h2>HC Supply Protection<br>Command Center</h2>
+        <div class="subtitle">用户操作手册 v1.0</div>
+    </div>
+
+    <div class="search-box">
+        <span class="search-icon">🔍</span>
+        <input type="text" id="searchInput" placeholder="搜索内容... (Ctrl+K)" autocomplete="off">
+    </div>
+    <div class="search-results-count" id="searchCount"></div>
+
+    <nav class="sidebar-nav" id="sidebarNav">
+        <span class="nav-group-title">快速开始</span>
+        <a href="#overview">工具概述</a>
+        <a href="#quick-start">快速启动</a>
+        <a href="#access">访问地址</a>
+
+        <span class="nav-group-title">功能介绍</span>
+        <a href="#tab-demand">Demand Assumption</a>
+        <a href="#tab-supply">Supply Protection</a>
+        <a href="#tab-project">Project Details</a>
+        <a href="#tab-demand-data">Demand Data</a>
+        <a href="#tab-production">Production Data</a>
+
+        <span class="nav-group-title">后台管理</span>
+        <a href="#admin-login">Admin 登录</a>
+        <a href="#admin-pipeline">运行 Pipeline</a>
+        <a href="#admin-backup">备份快照</a>
+        <a href="#admin-mail">周报邮件</a>
+        <a href="#admin-update">远程更新</a>
+        <a href="#admin-masterdata">主数据扫描</a>
+
+        <span class="nav-group-title">数据说明</span>
+        <a href="#data-sources">数据来源</a>
+        <a href="#pipeline-stages">Pipeline 阶段</a>
+        <a href="#data-output">产出文件</a>
+        <a href="#business-logic">业务逻辑</a>
+
+        <span class="nav-group-title">电脑操作</span>
+        <a href="#setup-new">新电脑部署</a>
+        <a href="#bat-startup">BAT 快捷启动</a>
+        <a href="#multi-machine">多机协作</a>
+        <a href="#troubleshooting">常见问题</a>
+
+        <span class="nav-group-title">配置</span>
+        <a href="#config-files">配置文件</a>
+        <a href="#env-vars">环境变量</a>
+    </nav>
+</aside>
+
+<!-- === MAIN CONTENT === -->
+<div class="main">
+    <!-- === HERO === -->
+    <div class="hero">
+        <h1>Hair Care Supply Protection<br><span>Command Center</span></h1>
+        <p>一站式供应链保护指挥中心 — 集成 Demand、Supply、Production 数据分析，支持后台管理、远程更新、自动化 Pipeline。</p>
+        <div class="hero-badges">
+            <span class="hero-badge">Dash 看板</span>
+            <span class="hero-badge">5 个分析页面</span>
+            <span class="hero-badge">Admin 后台</span>
+            <span class="hero-badge">一键部署</span>
+            <span class="hero-badge">自动 Pipeline</span>
+            <span class="hero-badge">GitHub 同步</span>
+        </div>
+    </div>
+
+    <div class="content">
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 工具概述 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="overview">
+            <h2>🎯 工具概述</h2>
+            <p>本工具是 Hair Care 供应链团队的数据指挥中心，通过 Web 看板实时展示关键业务数据。任何人只要有浏览器和内网访问即可使用。</p>
+
+            <div class="card-grid">
+                <div class="card">
+                    <div class="card-icon" style="background:#dbeafe;">📊</div>
+                    <h4>5 个分析页面</h4>
+                    <p>Demand Assumption、Supply Protection、Project Details、Demand Data、Production Data</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon" style="background:#dcfce7;">⚙️</div>
+                    <h4>Admin 后台</h4>
+                    <p>5 大管理功能：Pipeline 运行、备份、邮件、远程更新、主数据扫描</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon" style="background:#fef3c7;">🔄</div>
+                    <h4>自动化 Pipeline</h4>
+                    <p>4 个独立阶段，支持分阶段运行，实时进度条反馈</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon" style="background:#ede9fe;">🚀</div>
+                    <h4>一键部署</h4>
+                    <p>双击 BAT 文件自动拉取代码、创建环境、运行数据、启动看板</p>
+                </div>
+            </div>
+
+            <h3>技术架构</h3>
+            <div class="flow">
+                <div class="flow-step" style="background:#dbeafe;">源数据文件<br><small>Excel / CSV</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#fef3c7;">Pipeline<br><small>matres_pipeline.py</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#dcfce7;">处理结果<br><small>data/processed/</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#ede9fe;">Dash 看板<br><small>matres_app.py</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#fee2e2;">浏览器<br><small>http://IP:8050</small></div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 快速启动 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="quick-start">
+            <h2>🚀 快速启动</h2>
+            <p>最简单的启动方式：</p>
+
+            <ol class="step-list">
+                <li><strong>双击 <code>update_and_start_matres.bat</code></strong> — 位于项目根目录。这个脚本会自动完成所有事情：拉取最新代码、创建 Python 虚拟环境、安装依赖、运行数据处理、启动看板服务。</li>
+                <li><strong>等待命令行窗口显示启动信息</strong> — 看到 <code>Running on http://0.0.0.0:8050</code> 表示成功。整个过程大约 1-3 分钟。</li>
+                <li><strong>打开浏览器访问</strong> — 本机 <code>http://localhost:8050</code>，或局域网 <code>http://电脑IP:8050</code></li>
+            </ol>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">💡</span>
+                <div><strong>首次启动说明</strong>：首次运行需要安装 Python 依赖包，可能需要额外等待 2-5 分钟。之后的启动会快很多。</div>
+            </div>
+
+            <div class="callout callout-warn">
+                <span class="callout-icon">⚠️</span>
+                <div><strong>前提条件</strong>：电脑需安装 Python 3.10+ 和 Git。如果没有，BAT 文件会提示安装。</div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 访问地址 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="access">
+            <h2>🌐 访问地址</h2>
+            <table class="doc-table">
+                <tr><th>场景</th><th>地址</th><th>说明</th></tr>
+                <tr><td>本机访问</td><td><code>http://localhost:8050</code></td><td>在运行看板的电脑上打开浏览器</td></tr>
+                <tr><td>局域网访问</td><td><code>http://电脑IP:8050</code></td><td>其他电脑通过内网IP访问</td></tr>
+                <tr><td>Admin 后台</td><td><code>http://IP:8050/admin</code></td><td>管理面板，需输入密码</td></tr>
+            </table>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">💡</span>
+                <div>如何查看电脑 IP：打开 CMD，输入 <code>ipconfig</code>，找到 <code>IPv4 Address</code>（通常类似 <code>10.x.x.x</code>）。</div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Demand Assumption -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="tab-demand">
+            <h2>📊 Demand Assumption</h2>
+            <p>这是看板的默认首页，展示 Demand 需求假设与 Supply 保护的全景视图。</p>
+
+            <h3>包含的数据表</h3>
+            <table class="doc-table">
+                <tr><th>表名</th><th>内容</th><th>数据来源</th></tr>
+                <tr><td>Demand System LBE</td><td>需求系统 LBE 月度数据</td><td>HC IDP HANA TD Report（Monthly + Weekly TP）</td></tr>
+                <tr><td>Demand System LBE IYA</td><td>LBE 与去年同期对比百分比</td><td>LBE + Historical Shipment Data</td></tr>
+                <tr><td>Demand System LBE + Supply System Protection</td><td>需求 + 供应保护合并数据</td><td>LBE + Supply Protection 数据</td></tr>
+                <tr><td>Demand LBE + SSP IYA</td><td>合并数据的同期对比</td><td>HS 数据 + Historical Shipment Data</td></tr>
+                <tr><td>Supply Protection (PP + Base)</td><td>供应保护按 Level1 汇总</td><td>MatRes 工作簿</td></tr>
+                <tr><td>Supply Protection (HKTW + ESS)</td><td>HKTW和ESS的供应保护</td><td>MatRes 工作簿</td></tr>
+                <tr><td>Demand IYA by Quarter</td><td>按季度的 IYA 对比</td><td>月度数据按季度聚合</td></tr>
+            </table>
+
+            <h4>关键计算逻辑</h4>
+            <ul>
+                <li><strong>LBE 取数</strong>：当前月取 Weekly(TP) 的 ER → LBE，SU 转 MSU（÷1000）；非当前月取 Monthly sheet</li>
+                <li><strong>IYA 计算</strong>：<code>IYA% = 当月值 / 去年同月值 × 100</code>，分母为 0 或缺失时显示 <code>-</code></li>
+                <li><strong>HS 合并</strong>：<code>Demand HS = Demand LBE + Supply Protection</code>（Base → HS Base, PP → HS Promotion）</li>
+                <li><strong>时间窗口</strong>：当前季度 + 后续 2 个季度（共 9 个月）</li>
+            </ul>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Supply Protection -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="tab-supply">
+            <h2>🛡️ Supply Protection</h2>
+            <p>供应保护核心页面，展示 KPI 指标、角色分布和预警信息。</p>
+
+            <h3>页面组成</h3>
+            <div class="card-grid">
+                <div class="card">
+                    <h4>KPI 卡片</h4>
+                    <p><strong>ALL Protection MSU</strong>：保护总量<br><strong>Item Text</strong>：项目类别数<br><strong>PDE Alerts</strong>：未来 7 天到期预警</p>
+                </div>
+                <div class="card">
+                    <h4>Role 趋势图</h4>
+                    <p>按 Role 筛选（ALL / NI / On Going / Cross Region），堆叠柱状图 + 月度趋势线</p>
+                </div>
+                <div class="card">
+                    <h4>Role-Item 矩阵</h4>
+                    <p>角色 × Item Text 的月度 MSU 交叉汇总表，含 Total 行</p>
+                </div>
+                <div class="card">
+                    <h4>Past Due Alerts</h4>
+                    <p>PDE 预警明细 + FG Rolling 明细两张表</p>
+                </div>
+            </div>
+
+            <h4>Item Text 分类说明</h4>
+            <table class="doc-table">
+                <tr><th>Item Text</th><th>说明</th></tr>
+                <tr><td>R Quotation / R Component</td><td>FG Protection（成品保护）</td></tr>
+                <tr><td>R Material</td><td>Material Protection with rolling delay</td></tr>
+                <tr><td>FG Rolling</td><td>FG Protection with rolling delay</td></tr>
+                <tr><td>RM Material</td><td>RM Protection（原材料保护）</td></tr>
+            </table>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Project Details -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="tab-project">
+            <h2>📋 Project Details</h2>
+            <p>按项目维度的详细分析页面，支持多条件筛选和下钻。</p>
+
+            <h3>操作方式</h3>
+            <ol class="step-list">
+                <li><strong>选择 Role 筛选</strong> — 页面顶部的 Role 按钮：ALL / NI / On Going / Cross Region</li>
+                <li><strong>可选筛选</strong> — Requester Email 和 MRP Element Indicator 下拉筛选，支持多选和搜索</li>
+                <li><strong>查看汇总</strong> — Role × Item × Project 交叉汇总表，支持分页（每页 10 条）、排序</li>
+                <li><strong>下钻明细</strong> — 点击汇总表中任意行，下方显示对应的物料明细</li>
+                <li><strong>导出明细</strong> — 点击"下载全部明细"按钮导出 Excel</li>
+            </ol>
+
+            <h4>Total 行说明</h4>
+            <p>汇总表下方有一个独立的 Total 行，显示跨所有分页的合计值（不受分页影响）。</p>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Demand Data -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="tab-demand-data">
+            <h2>📈 Demand Data</h2>
+            <p>TD 版本对比分析，帮助发现 Demand 版本之间的差异。</p>
+
+            <h3>操作方式</h3>
+            <ol class="step-list">
+                <li><strong>查看主表</strong> — TD Version Monthly Comparison：展示 Current / Previous / Gap 三行数据，按 Prod Line (Base / PP) 分行</li>
+                <li><strong>点击 GAP 行</strong> — 点击 GAP 行任意月份单元格，下方展开两个明细表</li>
+                <li><strong>Level2 GAP Details</strong>（左侧）— 按 Level2 维度的差异汇总，可排序</li>
+                <li><strong>GAP Difference Details</strong>（右侧）— 按物料的差异明细，默认按 GAP 升序排</li>
+                <li><strong>导出</strong> — 两个明细表都支持 Export 到 Excel</li>
+            </ol>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">💡</span>
+                <div><strong>颜色含义</strong>：GAP &lt; 0 显示<span style="color:#dc2626;font-weight:700;">红色</span>（减少），GAP &gt; 0 显示<span style="color:#16a34a;font-weight:700;">绿色</span>（增加）。</div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Production Data -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="tab-production">
+            <h2>🏭 Production Data</h2>
+            <p>工厂生产数据，展示计划产量和实际进度。</p>
+
+            <h3>两张核心表</h3>
+            <table class="doc-table">
+                <tr><th>表</th><th>维度</th><th>说明</th></tr>
+                <tr><td>Table 1: By Plant</td><td>Plant</td><td>按工厂汇总，含 HP Total / XQ Total / TC Total / GC Total 汇总行</td></tr>
+                <tr><td>Table 2: By Plant / Level1 / Level2</td><td>Plant + Level1 + Level2</td><td>按工厂→分类→子分类 三级展开</td></tr>
+            </table>
+
+            <h4>工厂分组</h4>
+            <ul>
+                <li><strong>HP</strong> = 0386 + C810</li>
+                <li><strong>XQ</strong> = 1864 + D352</li>
+                <li><strong>TC</strong> = A868 + A673</li>
+                <li><strong>GC Total</strong> = 以上所有工厂合计</li>
+            </ul>
+
+            <h4>当月拆分说明</h4>
+            <p>当前月份列会拆分为 3 列：<span class="tag tag-blue">MTD</span>（已完成）、<span class="tag tag-amber">Left Production</span>（剩余计划）、<span class="tag tag-green">Current Month</span>（当月合计）</p>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Admin 登录 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="admin-login">
+            <h2>🔐 Admin 后台登录</h2>
+            <p>Admin 后台地址：<code>http://IP:8050/admin</code></p>
+
+            <ol class="step-list">
+                <li><strong>打开 Admin 页面</strong> — 在 Dashboard 右上角点击齿轮图标 ⚙️，或直接访问 <code>/admin</code></li>
+                <li><strong>输入密码</strong> — 默认密码：<code>HR</code>（可在 config/config.json 的 admin_password 字段修改）</li>
+                <li><strong>进入管理面板</strong> — 登录后可看到 5 张功能卡片</li>
+            </ol>
+
+            <div class="callout callout-warn">
+                <span class="callout-icon">⚠️</span>
+                <div>密码存储在 <code>config/config.json</code> 的 <code>admin_password</code> 字段中，是明文存储。登录 session 保存在浏览器 sessionStorage 中，关闭标签页后需重新登录。</div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Pipeline 运行 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="admin-pipeline">
+            <h2>🔄 Admin — 运行 Pipeline</h2>
+            <p>Card 1: Run Pipeline & Refresh</p>
+
+            <h3>操作步骤</h3>
+            <ol class="step-list">
+                <li><strong>选择数据范围</strong> — 下拉框选择：All Data / Demand / Supply / TD / Production</li>
+                <li><strong>点击 Run Pipeline</strong> — 按钮变为禁用状态，出现进度条</li>
+                <li><strong>等待完成</strong> — 进度条实时显示当前阶段名和完成百分比</li>
+                <li><strong>自动刷新</strong> — Pipeline 完成后看板数据自动更新</li>
+            </ol>
+
+            <h4>阶段说明</h4>
+            <table class="doc-table">
+                <tr><th>选项</th><th>运行阶段</th><th>耗时参考</th></tr>
+                <tr><td>All Data</td><td>Supply → Demand → TD → Production 全部</td><td>~30 秒</td></tr>
+                <tr><td>Demand</td><td>仅 Demand（HC IDP）</td><td>~8 秒</td></tr>
+                <tr><td>Supply</td><td>仅 Supply Protection（MR）</td><td>~10 秒</td></tr>
+                <tr><td>TD</td><td>仅 TD Validation</td><td>~5 秒</td></tr>
+                <tr><td>Production</td><td>仅 Production Data</td><td>~8 秒</td></tr>
+            </table>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 备份快照 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="admin-backup">
+            <h2>💾 Admin — 备份快照</h2>
+            <p>Card 2: Backup Snapshot — 导出当前看板所有数据到 Excel。</p>
+
+            <h3>操作</h3>
+            <p>点击 <strong>Create Backup</strong> → 自动生成并下载 Excel 文件。同时在服务器端保存到 <code>data/history/dashboard_snapshots/snapshot_{时间戳}/</code>。</p>
+
+            <h4>导出内容</h4>
+            <p>包含所有 5 个页面的所有数据表，每张表对应一个 Excel Sheet，Sheet 名以页面缩写为前缀（DMD / SP / PRJ / VAL / PRD）。</p>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 周报邮件 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="admin-mail">
+            <h2>✉️ Admin — 周报邮件</h2>
+            <p>Card 3: Weekly Mail Preview — 生成并预览周报 HTML 邮件。</p>
+            <p>点击 <strong>Refresh Mail & Open</strong> → 在新标签页打开最新生成的 HTML 邮件预览。可以直接复制邮件内容用于发送。</p>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 远程更新 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="admin-update">
+            <h2>🚀 Admin — 远程更新</h2>
+            <p>Card 4: Update & Restart — 从 GitHub 拉取最新代码并重启应用。</p>
+
+            <h3>执行流程</h3>
+            <div class="flow">
+                <div class="flow-step" style="background:#dbeafe;">git pull<br><small>拉取最新代码</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#dcfce7;">pip install<br><small>安装新依赖</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#fef3c7;">写入标记文件<br><small>.run_pipeline_on_start</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#ede9fe;">os.execv()<br><small>重启进程</small></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step" style="background:#fee2e2;">自动运行<br><small>全量 Pipeline</small></div>
+            </div>
+
+            <div class="callout callout-danger">
+                <span class="callout-icon">🚨</span>
+                <div>
+                    <strong>重要提醒</strong>：此功能必须在应用通过 BAT 文件（CMD 窗口）启动时使用。如果应用是从 VS Code 终端启动的，重启可能因为终端断开而失败。
+                </div>
+            </div>
+
+            <h4>操作后</h4>
+            <p>页面会提示"请在 ~10 秒后刷新页面"。等待后按 <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 强制刷新浏览器。</p>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 主数据扫描 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="admin-masterdata">
+            <h2>🔍 Admin — 主数据扫描</h2>
+            <p>Card 5: Master Data Update — 扫描 Production Volume 数据，找出缺失映射的物料。</p>
+
+            <h3>两种缺失类型</h3>
+            <table class="doc-table">
+                <tr><th>类型</th><th>颜色</th><th>含义</th><th>修复方式</th></tr>
+                <tr>
+                    <td><span class="tag tag-red">Seg 缺失</span></td>
+                    <td>红色</td>
+                    <td>物料代码在 Seg Summary 映射文件中找不到</td>
+                    <td>在 <code>HairCare Code List By Seg_Update Version.xlsx</code> 的 Seg summary sheet 中补充该物料</td>
+                </tr>
+                <tr>
+                    <td><span class="tag tag-amber">SU Factor</span></td>
+                    <td>橙色</td>
+                    <td>WIP 物料代码在 Parameter.xlsx 中没有 9 字头 SU 映射</td>
+                    <td>在 <code>Parameter.xlsx</code> 中补充该物料的 Code 和 9字头SU 列</td>
+                </tr>
+            </table>
+
+            <h3>Data Source 列说明</h3>
+            <table class="doc-table">
+                <tr><th>值</th><th>颜色</th><th>含义</th></tr>
+                <tr><td>Production Data</td><td><span style="color:#2563eb;">蓝色</span></td><td>该物料仅在 Production Vol 报表中有非零数据</td></tr>
+                <tr><td>Demand Data</td><td><span style="color:#7c3aed;">紫色</span></td><td>该物料仅在 TD 版本差异明细中有非零数据</td></tr>
+                <tr><td>Production Data / Demand Data</td><td><span style="color:#7c3aed;">紫色</span></td><td>两个数据源都有数据</td></tr>
+            </table>
+
+            <h3>操作步骤</h3>
+            <ol class="step-list">
+                <li><strong>点击 Scan Missing Data</strong> — 系统扫描所有 Production Volume 文件，约需 5-10 秒</li>
+                <li><strong>查看结果表</strong> — 展示缺失物料列表，支持排序和分页（每页 20 条）</li>
+                <li><strong>点击 Export to Excel</strong> — 导出到 <code>data/history/master_data_reports/</code></li>
+            </ol>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">💡</span>
+                <div><strong>过滤逻辑</strong>：仅显示在 Production Data 或 Demand Data 中有实际数据的物料。无任何数据的"僵尸物料"会被自动排除。</div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 数据来源 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="data-sources">
+            <h2>📂 数据来源</h2>
+            <p>系统读取以下源数据文件：</p>
+
+            <table class="doc-table">
+                <tr><th>文件</th><th>位置</th><th>用途</th></tr>
+                <tr><td>MR Upload Request Form_VM Version.xlsm</td><td><code>0.Data Base/</code></td><td>Supply Protection 主数据（MatRes Record sheet）</td></tr>
+                <tr><td>HairCare Code List By Seg_Update Version.xlsx</td><td><code>0.Data Base/</code></td><td>Level1 Seg 映射文件</td></tr>
+                <tr><td>HC IDP HANA TD Report (日期).xlsm</td><td><code>0.Data Base/</code></td><td>Demand 需求数据（自动取最新文件）</td></tr>
+                <tr><td>Production Volume 相关 Excel 文件</td><td><code>0.Data Base/Production Volume/</code></td><td>生产数据（HP/XQTC Production Vol、MTD、Parameter）</td></tr>
+                <tr><td>Historical Shipment Data_FY2425.xlsx</td><td><code>0.Data Base/</code> 或项目根目录</td><td>去年同期出货数据（用于 IYA 计算）</td></tr>
+                <tr><td>requester_roles.json</td><td><code>config/</code></td><td>Email → Role 映射规则</td></tr>
+            </table>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: Pipeline 阶段 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="pipeline-stages">
+            <h2>⚡ Pipeline 阶段</h2>
+            <p>数据处理流水线分为 4 个独立阶段：</p>
+
+            <table class="doc-table">
+                <tr><th>阶段</th><th>名称</th><th>处理内容</th><th>产出文件</th></tr>
+                <tr>
+                    <td><span class="tag tag-blue">supply</span></td>
+                    <td>Supply Protection</td>
+                    <td>读取 MR 工作簿，清洗数据，构建月度 MSU 汇总、PDE 预警、请求明细</td>
+                    <td>monthly_msu_*.csv, pde_alerts.csv, matres_request_details.csv</td>
+                </tr>
+                <tr>
+                    <td><span class="tag tag-green">demand</span></td>
+                    <td>Demand (HC IDP)</td>
+                    <td>读取 HC IDP 报表，汇总月度 LBE 数据</td>
+                    <td>hc_idp_monthly_summary.csv</td>
+                </tr>
+                <tr>
+                    <td><span class="tag tag-purple">td</span></td>
+                    <td>TD Validation</td>
+                    <td>对比 TD 版本差异，计算月度 Gap</td>
+                    <td>td_version_monthly_comparison.csv, td_version_gap_details.csv</td>
+                </tr>
+                <tr>
+                    <td><span class="tag tag-amber">production</span></td>
+                    <td>Production Data</td>
+                    <td>读取 Production Vol 文件，按工厂和 Level 汇总</td>
+                    <td>production_data_summary.csv, production_data_summary_by_level.csv</td>
+                </tr>
+            </table>
+
+            <h4>CLI 手动运行</h4>
+<pre><code># 运行全部阶段
+python scripts\matres_pipeline.py
+
+# 仅运行 demand 阶段
+python scripts\matres_pipeline.py --stages demand
+
+# 运行多个阶段
+python scripts\matres_pipeline.py --stages demand,td</code></pre>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 产出文件 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="data-output">
+            <h2>📄 产出文件</h2>
+            <p>Pipeline 处理结果保存在 <code>data/processed/</code> 目录：</p>
+
+            <table class="doc-table">
+                <tr><th>文件名</th><th>说明</th></tr>
+                <tr><td>monthly_msu_by_item_text.csv</td><td>按 Item Text 的月度 MSU 汇总</td></tr>
+                <tr><td>monthly_msu_by_requester_item.csv</td><td>按 Requester + Item + Role 的月度明细</td></tr>
+                <tr><td>monthly_msu_by_level1.csv</td><td>按 Level1 分类的月度 MSU 汇总</td></tr>
+                <tr><td>pde_alerts.csv</td><td>PDE 预警列表</td></tr>
+                <tr><td>matres_request_details.csv</td><td>请求明细（供下钻使用）</td></tr>
+                <tr><td>level1_unmapped_materials.csv</td><td>未映射物料列表</td></tr>
+                <tr><td>hc_idp_monthly_summary.csv</td><td>HC IDP 月度 Demand 汇总</td></tr>
+                <tr><td>td_version_monthly_comparison.csv</td><td>TD 版本月度对比</td></tr>
+                <tr><td>td_version_gap_details.csv</td><td>TD 版本差异物料明细</td></tr>
+                <tr><td>production_data_summary.csv</td><td>生产数据按工厂汇总</td></tr>
+                <tr><td>production_data_summary_by_level.csv</td><td>生产数据按工厂+Level 汇总</td></tr>
+                <tr><td>pipeline_progress.json</td><td>Pipeline 运行进度（Dashboard 轮询用）</td></tr>
+            </table>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 业务逻辑 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="business-logic">
+            <h2>🧮 业务逻辑</h2>
+
+            <h3>角色映射规则</h3>
+            <ul>
+                <li>Email → Role 映射定义在 <code>config/requester_roles.json</code></li>
+                <li>支持 Email typo 自动修复（如 <code>@pg,com</code> → <code>@pg.com</code>）</li>
+                <li>未匹配的 Email 归为 <code>Others</code></li>
+                <li>UI 显示名：IOL → NI，CSP → On Going，CROSS REGION → Cross Region</li>
+            </ul>
+
+            <h3>Level1 映射规则</h3>
+            <ul>
+                <li>来自 Level1 映射工作簿（Seg summary sheet）</li>
+                <li>若映射缺失：Item Text = RM Material 的强制归到 Base，其他保留 "未映射"</li>
+                <li>未映射数值接近 0 时自动隐藏</li>
+            </ul>
+
+            <h3>Production Volume 筛选规则</h3>
+            <ul>
+                <li><code>Categories / Members = 2.0Production/Receipts</code></li>
+                <li><code>Plant</code> 非空、<code>Material</code> 非空</li>
+                <li><code>MRP Elements</code> 仅保留 <code>2.1Planned Orders</code> 和 <code>2.2Process Orders</code></li>
+                <li><code>Other</code> 被排除（避免与 MTD 中 QM 重复计算）</li>
+                <li>月份列动态展示（不固定 6 个月）</li>
+            </ul>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 新电脑部署 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="setup-new">
+            <h2>💻 新电脑部署</h2>
+
+            <h3>前提条件</h3>
+            <table class="doc-table">
+                <tr><th>软件</th><th>版本</th><th>获取方式</th></tr>
+                <tr><td>Python</td><td>3.10+（推荐 3.11 或 3.13）</td><td><a href="https://www.python.org/downloads/" target="_blank">python.org</a></td></tr>
+                <tr><td>Git</td><td>最新版</td><td><a href="https://git-scm.com/" target="_blank">git-scm.com</a></td></tr>
+            </table>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">💡</span>
+                <div>安装 Python 时务必勾选 <strong>"Add Python to PATH"</strong>。</div>
+            </div>
+
+            <h3>部署步骤</h3>
+            <ol class="step-list">
+                <li><strong>获取项目文件</strong> — 从 OneDrive 共享文件夹复制整个项目目录到目标电脑，或使用 Git clone：
+<pre><code>git clone https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git</code></pre></li>
+                <li><strong>确认数据文件</strong> — 确保 <code>0.Data Base/</code> 目录下有完整的源数据文件</li>
+                <li><strong>双击 <code>update_and_start_matres.bat</code></strong> — 自动处理一切</li>
+                <li><strong>开放防火墙（可选）</strong> — 如需局域网访问：
+<pre><code>netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol=TCP localport=8050</code></pre></li>
+            </ol>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: BAT 启动 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="bat-startup">
+            <h2>📦 BAT 快捷启动</h2>
+            <p>项目提供 <code>update_and_start_matres.bat</code> 一键启动脚本，6 步自动化：</p>
+
+            <div class="flow">
+                <div class="flow-step">①检查 Git</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">②初始化仓库</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">③绑定远程</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">④拉取代码</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">⑤Python 环境</div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">⑥Pipeline + 启动</div>
+            </div>
+
+            <h4>虚拟环境说明</h4>
+            <ul>
+                <li>BAT 文件会创建 <code>.venv_{电脑名}</code> 目录作为虚拟环境（多机不冲突）</li>
+                <li>如果已存在 <code>.venv</code> 则直接复用</li>
+                <li>已有环境损坏会自动重建</li>
+            </ul>
+
+            <div class="callout callout-success">
+                <span class="callout-icon">✅</span>
+                <div><strong>推荐使用 BAT 文件启动</strong>，而不是从 VS Code 终端启动。BAT 文件运行在独立的 CMD 窗口中，不受 VS Code 影响，Update & Restart 功能也能正常工作。</div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 多机协作 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="multi-machine">
+            <h2>🌍 多机协作</h2>
+            <p>支持多台电脑同时部署、通过 GitHub 同步代码。</p>
+
+            <h3>工作模式</h3>
+            <table class="doc-table">
+                <tr><th>电脑</th><th>角色</th><th>操作</th></tr>
+                <tr><td>开发机（xu.hr）</td><td>主开发</td><td>编写代码 → <code>git push origin main</code></td></tr>
+                <tr><td>部署机（hairastro.im 或 VM）</td><td>服务部署</td><td>通过 BAT 文件启动或 Admin 面板 Update & Restart 拉取最新代码</td></tr>
+            </table>
+
+            <h3>同步方式</h3>
+            <div class="card-grid">
+                <div class="card">
+                    <h4>方式一：BAT 文件</h4>
+                    <p>双击 <code>update_and_start_matres.bat</code>，会自动 <code>git fetch + checkout + reset --hard</code> 到最新代码。</p>
+                </div>
+                <div class="card">
+                    <h4>方式二：Admin 面板</h4>
+                    <p>在浏览器中打开 Admin → 点击 Update & Restart，后台自动 <code>git pull</code> 并重启。</p>
+                </div>
+            </div>
+
+            <h4>数据文件共享</h4>
+            <p>数据文件（<code>0.Data Base/</code>）通过 OneDrive 共享文件夹同步，不通过 Git。确保两台电脑都能访问相同的数据源。</p>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 常见问题 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="troubleshooting">
+            <h2>❓ 常见问题</h2>
+
+            <div class="card" style="border-left: 4px solid var(--accent-red);">
+                <h4>Q: 浏览器显示 "127.0.0.1 refused to connect"</h4>
+                <p>应用进程未启动或已退出。检查：<br>
+                ① 命令行窗口是否仍在运行<br>
+                ② 运行 <code>netstat -ano | findstr :8050</code> 检查端口<br>
+                ③ 重新双击 BAT 文件启动</p>
+            </div>
+
+            <div class="card" style="border-left: 4px solid var(--accent-amber);">
+                <h4>Q: 看到的是旧数据</h4>
+                <p>① <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> 强制刷新浏览器<br>
+                ② 检查是否有多个 Python 进程（任务管理器 → 结束所有 python.exe → 重启）<br>
+                ③ 去 Admin → Run Pipeline 重新运行数据处理</p>
+            </div>
+
+            <div class="card" style="border-left: 4px solid var(--accent-blue);">
+                <h4>Q: Update & Restart 后应用没重启</h4>
+                <p>如果应用是从 VS Code 终端启动的，os.execv 可能因终端断开而失败。<br>
+                解决方案：关闭所有 Python 进程 → 双击 BAT 文件重新启动。</p>
+            </div>
+
+            <div class="card" style="border-left: 4px solid var(--accent-purple);">
+                <h4>Q: git push 失败 (TLS / schannel 错误)</h4>
+                <p>在 PowerShell 中使用重试命令：</p>
+<pre><code>$ok=$false; 1..3 | ForEach-Object {
+  git -c http.version=HTTP/1.1 `
+      -c http.schannelCheckRevoke=false `
+      push origin main
+  if ($LASTEXITCODE -eq 0) { $ok=$true; break }
+  Start-Sleep -Seconds 2
+}
+if (-not $ok) { exit 1 }</code></pre>
+            </div>
+
+            <div class="card" style="border-left: 4px solid var(--accent-green);">
+                <h4>Q: 找不到 Python</h4>
+                <p>确认安装 Python 3.10+ 并勾选了 "Add to PATH"。<br>
+                CMD 中运行 <code>python --version</code> 验证。<br>
+                如果刚安装，需要重启 CMD / PowerShell 窗口。</p>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 配置文件 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="config-files">
+            <h2>⚙️ 配置文件</h2>
+
+            <h3>config/config.json</h3>
+            <p>核心配置文件，控制所有数据源路径和系统参数：</p>
+
+            <table class="doc-table">
+                <tr><th>字段</th><th>说明</th><th>示例值</th></tr>
+                <tr><td>workbook_path</td><td>MR 主数据工作簿</td><td><code>0.Data Base/MR Upload Request Form_VM Version.xlsm</code></td></tr>
+                <tr><td>sheet_name</td><td>读取的 Sheet 名</td><td><code>MatRes Record</code></td></tr>
+                <tr><td>level1_workbook_path</td><td>Level1 Seg 映射文件</td><td><code>0.Data Base/HairCare Code List By Seg_Update Version.xlsx</code></td></tr>
+                <tr><td>data_base_dir</td><td>数据根目录</td><td><code>0.Data Base</code></td></tr>
+                <tr><td>production_data_dir</td><td>Production Volume 目录</td><td><code>0.Data Base/Production Volume</code></td></tr>
+                <tr><td>processed_dir</td><td>Pipeline 输出目录</td><td><code>data/processed</code></td></tr>
+                <tr><td>admin_password</td><td>Admin 登录密码</td><td><code>HR</code></td></tr>
+            </table>
+
+            <h3>config/requester_roles.json</h3>
+            <p>Requester Email → Role 的映射关系。当前映射了 13 个邮箱地址到 4 个角色（IOL / CSP / CROSS REGION / SIP）。</p>
+        </div>
+
+        <!-- ================================================================ -->
+        <!-- SECTION: 环境变量 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="env-vars">
+            <h2>🔧 环境变量</h2>
+            <p>可通过环境变量自定义应用行为（均为可选）：</p>
+
+            <table class="doc-table">
+                <tr><th>变量</th><th>默认值</th><th>说明</th></tr>
+                <tr><td><code>MATRES_HOST</code></td><td><code>0.0.0.0</code></td><td>监听地址</td></tr>
+                <tr><td><code>MATRES_PORT</code></td><td><code>8050</code></td><td>监听端口</td></tr>
+                <tr><td><code>MATRES_DEBUG</code></td><td><code>false</code></td><td>调试模式（true/false）</td></tr>
+                <tr><td><code>MATRES_ALLOWED_SUBNETS</code></td><td>无</td><td>访问控制白名单（CIDR 格式，如 <code>10.0.0.0/8,172.16.0.0/12</code>）</td></tr>
+            </table>
+        </div>
+
+        <!-- === Footer === -->
+        <div style="margin-top: 60px; padding-top: 30px; border-top: 1px solid var(--border-light); text-align: center; color: var(--text-muted); font-size: 13px;">
+            <p>Hair Care Supply Protection Command Center — 用户指南</p>
+            <p>Generated on 2026-04-14 | Version 1.0</p>
+        </div>
+
+    </div><!-- .content -->
+</div><!-- .main -->
+
+<!-- === JAVASCRIPT === -->
+<script>
+(function() {
+    'use strict';
+
+    /* === SIDEBAR TOGGLE (MOBILE) === */
+    const sidebar = document.getElementById('sidebar');
+    const toggleBtn = document.getElementById('sidebarToggle');
+
+    toggleBtn.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+    });
+
+    // Close sidebar when clicking a link on mobile
+    sidebar.querySelectorAll('a[href^="#"]').forEach(link => {
+        link.addEventListener('click', () => {
+            if (window.innerWidth <= 900) sidebar.classList.remove('open');
+        });
+    });
+
+    /* === ACTIVE NAV LINK TRACKING === */
+    const sections = document.querySelectorAll('.section[id]');
+    const navLinks = document.querySelectorAll('.sidebar-nav a[href^="#"]');
+    const navLinkMap = {};
+    navLinks.forEach(a => { navLinkMap[a.getAttribute('href').slice(1)] = a; });
+
+    const observerNav = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                navLinks.forEach(a => a.classList.remove('active'));
+                const link = navLinkMap[entry.target.id];
+                if (link) link.classList.add('active');
+            }
+        });
+    }, { rootMargin: '-20% 0px -70% 0px', threshold: 0 });
+
+    sections.forEach(section => observerNav.observe(section));
+
+    /* === REVEAL ANIMATION === */
+    const revealObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+            if (entry.isIntersecting) {
+                entry.target.classList.add('visible');
+            }
+        });
+    }, { threshold: 0.05 });
+
+    document.querySelectorAll('.reveal').forEach(el => revealObserver.observe(el));
+
+    /* === SEARCH FUNCTIONALITY === */
+    const searchInput = document.getElementById('searchInput');
+    const searchCount = document.getElementById('searchCount');
+    const contentArea = document.querySelector('.content');
+
+    // Ctrl+K to focus search
+    document.addEventListener('keydown', (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+            e.preventDefault();
+            searchInput.focus();
+        }
+        if (e.key === 'Escape' && document.activeElement === searchInput) {
+            searchInput.value = '';
+            clearSearch();
+            searchInput.blur();
+        }
+    });
+
+    let searchDebounce;
+    searchInput.addEventListener('input', () => {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(performSearch, 200);
+    });
+
+    function performSearch() {
+        const query = searchInput.value.trim().toLowerCase();
+
+        // Clear previous highlights
+        clearSearch();
+
+        if (!query || query.length < 2) {
+            searchCount.style.display = 'none';
+            return;
+        }
+
+        let matchCount = 0;
+        const allSections = contentArea.querySelectorAll('.section');
+
+        allSections.forEach(section => {
+            const textNodes = getTextNodes(section);
+            let sectionHasMatch = false;
+
+            textNodes.forEach(node => {
+                const text = node.textContent;
+                const lowerText = text.toLowerCase();
+                const idx = lowerText.indexOf(query);
+
+                if (idx !== -1) {
+                    sectionHasMatch = true;
+                    matchCount++;
+
+                    // Highlight the match
+                    const span = document.createElement('span');
+                    const before = document.createTextNode(text.substring(0, idx));
+                    const mark = document.createElement('mark');
+                    mark.className = 'search-highlight';
+                    mark.textContent = text.substring(idx, idx + query.length);
+                    const after = document.createTextNode(text.substring(idx + query.length));
+
+                    span.appendChild(before);
+                    span.appendChild(mark);
+                    span.appendChild(after);
+                    span.setAttribute('data-search-restore', text);
+
+                    node.parentNode.replaceChild(span, node);
+                }
+            });
+
+            if (!sectionHasMatch) {
+                section.classList.add('search-hidden');
+            }
+        });
+
+        searchCount.textContent = matchCount > 0
+            ? `找到 ${matchCount} 处匹配`
+            : '未找到匹配内容';
+        searchCount.style.display = 'block';
+
+        // Scroll to first match
+        const firstMark = contentArea.querySelector('mark.search-highlight');
+        if (firstMark) {
+            firstMark.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+
+    function clearSearch() {
+        // Remove hidden class
+        contentArea.querySelectorAll('.section.search-hidden').forEach(el => {
+            el.classList.remove('search-hidden');
+        });
+
+        // Restore highlighted nodes
+        contentArea.querySelectorAll('[data-search-restore]').forEach(span => {
+            const text = document.createTextNode(span.getAttribute('data-search-restore'));
+            span.parentNode.replaceChild(text, span);
+        });
+    }
+
+    function getTextNodes(element) {
+        const walker = document.createTreeWalker(
+            element,
+            NodeFilter.SHOW_TEXT,
+            {
+                acceptNode: (node) => {
+                    // Skip script, style, code, pre tags
+                    const parent = node.parentElement;
+                    if (!parent) return NodeFilter.FILTER_REJECT;
+                    const tag = parent.tagName.toLowerCase();
+                    if (['script', 'style', 'code', 'pre', 'mark'].includes(tag)) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    if (node.textContent.trim().length === 0) {
+                        return NodeFilter.FILTER_REJECT;
+                    }
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+            }
+        );
+
+        const nodes = [];
+        let node;
+        while (node = walker.nextNode()) { nodes.push(node); }
+        return nodes;
+    }
+
+})();
+</script>
+
+</body>
+</html>
