@@ -11,6 +11,7 @@
   "processed_dir": "data/processed",
   "requester_roles_path": "config/requester_roles.json",
   "time_zone": "Asia/Shanghai",
+  "admin_password": "changeme",
   "refresh": {
     "append_history": true,
     "history_keys": ["Material Number", "Reservation No", "Availability Date"]

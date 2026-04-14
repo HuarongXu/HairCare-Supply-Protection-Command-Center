@@ -328,3 +328,132 @@ body {
   text-overflow: clip;
   vertical-align: top;
 }
+
+/* ── Admin Page ────────────────────────────────────────────── */
+.admin-page {
+  min-height: 100vh;
+  padding: 40px 32px;
+  width: 90%;
+  max-width: 860px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.admin-login-box {
+  max-width: 360px;
+  margin: 80px auto 0;
+  padding: 32px 28px;
+  background: #ffffff;
+  border: 1px solid #d9e5f3;
+  border-radius: 20px;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.07);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.admin-input {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  font-size: 15px;
+  font-family: 'Century Gothic', 'Segoe UI', sans-serif;
+  outline: none;
+  transition: border-color 0.2s;
+  box-sizing: border-box;
+}
+
+.admin-input:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+}
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 24px;
+}
+
+.admin-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.admin-card {
+  background: #ffffff;
+  border: 1px solid #d9e5f3;
+  border-radius: 18px;
+  padding: 22px 24px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+}
+
+.admin-card h3 {
+  margin: 0 0 6px 0;
+  color: #1e3a8a;
+  font-family: 'Century Gothic', 'Segoe UI', sans-serif;
+  font-size: 1.1rem;
+}
+
+.admin-card p {
+  margin: 0 0 12px 0;
+  color: #64748b;
+  font-size: 0.9rem;
+}
+
+.admin-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 9px 20px;
+  border-radius: 10px;
+  border: 1px solid #c7d8eb;
+  background: #f8fbff;
+  color: #334155;
+  font-family: 'Century Gothic', 'Segoe UI', sans-serif;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.admin-btn:hover {
+  border-color: #60a5fa;
+  color: #1d4ed8;
+  background: #eef5ff;
+}
+
+.admin-btn--primary {
+  background: linear-gradient(145deg, #3b82f6 0%, #2563eb 100%);
+  color: #ffffff;
+  border-color: #2563eb;
+}
+
+.admin-btn--primary:hover {
+  background: linear-gradient(145deg, #2563eb 0%, #1d4ed8 100%);
+  color: #ffffff;
+}
+
+.admin-btn--primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.admin-btn--danger {
+  background: linear-gradient(145deg, #ef4444 0%, #dc2626 100%);
+  color: #ffffff;
+  border-color: #dc2626;
+}
+
+.admin-btn--danger:hover {
+  background: linear-gradient(145deg, #dc2626 0%, #b91c1c 100%);
+  color: #ffffff;
+}
+
+.admin-btn--danger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

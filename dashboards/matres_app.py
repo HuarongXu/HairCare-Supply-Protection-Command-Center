@@ -35,6 +35,7 @@ _PIPELINE_PROGRESS_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_progr
 class AppConfig:
     processed_dir: Path
     data_base_dir: Path
+    admin_password: str = "HR"
 
     @staticmethod
     def load(path: Path) -> "AppConfig":
@@ -47,7 +48,9 @@ class AppConfig:
         if not data_base_dir.is_absolute():
             data_base_dir = path.parent.parent / data_base_dir
 
-        return AppConfig(processed_dir=processed_dir, data_base_dir=data_base_dir)
+        admin_password = raw.get("admin_password", "HR")
+
+        return AppConfig(processed_dir=processed_dir, data_base_dir=data_base_dir, admin_password=admin_password)
 
 
 def load_dataset(processed_dir: Path, filename: str) -> pd.DataFrame:
@@ -3440,6 +3443,17 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
             dcc.Interval(id="pipeline-progress-interval", interval=1000, n_intervals=0, disabled=True),
             dcc.Store(id="data-store", data=data_bundle),
             dcc.Store(id="details-version-store", data={"version": details_version}),
+            # --- hidden placeholders that admin callbacks target ---
+            dcc.Dropdown(id="refresh-scope-dropdown", value="all", style={"display": "none"}),
+            html.Button(id="manual-refresh-btn", n_clicks=0, style={"display": "none"}),
+            html.Div(id="pipeline-progress-container", style={"display": "none"}),
+            html.Div(id="pipeline-progress-fill", style={"display": "none"}),
+            html.Span("", id="pipeline-progress-pct", style={"display": "none"}),
+            html.Div("", id="pipeline-progress-text", style={"display": "none"}),
+            html.Span("", id="manual-refresh-status", style={"display": "none"}),
+            html.Button(id="backup-snapshot-btn", n_clicks=0, style={"display": "none"}),
+            html.Span("", id="backup-snapshot-status", style={"display": "none"}),
+            dcc.Download(id="backup-snapshot-download"),
             html.Div(
                 className="hero",
                 children=[
@@ -3448,109 +3462,18 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                             html.H1("Hair Care Supply Protection Command Center"),
                         ]
                     ),
-                    html.Div(
-                        style={
-                            "display": "flex",
-                            "flexDirection": "column",
-                            "alignItems": "flex-end",
-                            "gap": "8px",
-                            "minWidth": "320px",
-                            "marginLeft": "auto",
-                        },
-                        children=[
-                            html.Div(
-                                style={"display": "flex", "gap": "6px", "alignItems": "center"},
-                                children=[
-                                    dcc.Dropdown(
-                                        id="refresh-scope-dropdown",
-                                        options=[
-                                            {"label": info["label"], "value": key}
-                                            for key, info in REFRESH_GROUPS.items()
-                                        ],
-                                        value="all",
-                                        clearable=False,
-                                        style={
-                                            "width": "200px",
-                                            "fontSize": "13px",
-                                            "fontFamily": GLOBAL_FONT_FAMILY,
-                                        },
-                                    ),
-                                    html.Button(
-                                        "Run Pipeline & Refresh",
-                                        id="manual-refresh-btn",
-                                        n_clicks=0,
-                                        style={"whiteSpace": "nowrap"},
-                                    ),
-                                ],
-                            ),
-                            # --- progress bar (hidden by default) ---
-                            html.Div(
-                                id="pipeline-progress-container",
-                                style={"display": "none", "width": "100%"},
-                                children=[
-                                    html.Div(
-                                        style={
-                                            "background": "#e5e7eb",
-                                            "borderRadius": "4px",
-                                            "height": "18px",
-                                            "overflow": "hidden",
-                                            "position": "relative",
-                                            "width": "100%",
-                                        },
-                                        children=[
-                                            html.Div(
-                                                id="pipeline-progress-fill",
-                                                style={
-                                                    "width": "0%",
-                                                    "height": "100%",
-                                                    "backgroundColor": "#3b82f6",
-                                                    "borderRadius": "4px",
-                                                    "transition": "width 0.4s ease",
-                                                },
-                                            ),
-                                            html.Span(
-                                                "0%",
-                                                id="pipeline-progress-pct",
-                                                style={
-                                                    "position": "absolute",
-                                                    "top": "0",
-                                                    "left": "50%",
-                                                    "transform": "translateX(-50%)",
-                                                    "fontSize": "11px",
-                                                    "lineHeight": "18px",
-                                                    "color": "#1f2937",
-                                                    "fontWeight": "600",
-                                                },
-                                            ),
-                                        ],
-                                    ),
-                                    html.Div(
-                                        "",
-                                        id="pipeline-progress-text",
-                                        style={
-                                            "fontSize": "12px",
-                                            "color": "#6b7280",
-                                            "marginTop": "2px",
-                                            "textAlign": "center",
-                                        },
-                                    ),
-                                ],
-                            ),
-                            html.Span(
-                                "",
-                                id="manual-refresh-status",
-                                style={"fontSize": "12px", "color": "#16a34a", "textAlign": "right"},
-                            ),
-                            html.Button("Backup Snapshot", id="backup-snapshot-btn", n_clicks=0),
-                            html.Span("", id="backup-snapshot-status", style={"fontSize": "13px", "color": "#334155", "textAlign": "right"}),
-                            html.A(
-                                html.Button("Refresh Mail & Open HTML", id="refresh-mail-open-btn", n_clicks=0),
-                                href="/mail-preview/latest",
-                                target="_blank",
-                                style={"textDecoration": "none"},
-                            ),
-                            dcc.Download(id="backup-snapshot-download"),
-                        ],
+                    html.A(
+                        html.Span("\u2699", style={
+                            "fontSize": "22px",
+                            "color": "#94a3b8",
+                            "cursor": "pointer",
+                            "padding": "4px 8px",
+                            "borderRadius": "8px",
+                            "transition": "color 0.2s",
+                        }),
+                        href="/admin",
+                        title="Admin Panel",
+                        style={"textDecoration": "none", "marginLeft": "auto", "alignSelf": "center"},
                     ),
                 ],
             ),
@@ -3558,6 +3481,142 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 id="page-tabs",
                 value="demand-assumption",
                 children=[demand_assumption_tab, overview_tab, drill_tab, data_validation_tab, production_data_tab],
+            ),
+        ],
+    )
+
+
+def build_admin_layout(cfg: AppConfig) -> html.Div:
+    """Build the /admin page layout with login gate and management panel."""
+    return html.Div(
+        className="admin-page",
+        children=[
+            dcc.Store(id="admin-session", storage_type="session", data={"authenticated": False}),
+            # ── Login form (visible when not authenticated) ──
+            html.Div(
+                id="admin-login-box",
+                className="admin-login-box",
+                children=[
+                    html.H2("Admin Login", style={"margin": "0 0 16px 0", "color": "#1e3a8a"}),
+                    dcc.Input(
+                        id="admin-password-input",
+                        type="password",
+                        placeholder="Enter password",
+                        className="admin-input",
+                        n_submit=0,
+                    ),
+                    html.Button("Login", id="admin-login-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
+                    html.Span("", id="admin-login-error", style={"color": "#dc2626", "fontSize": "13px", "marginTop": "6px"}),
+                ],
+            ),
+            # ── Admin panel (hidden until authenticated) ──
+            html.Div(
+                id="admin-panel",
+                className="admin-panel",
+                style={"display": "none"},
+                children=[
+                    html.Div(
+                        className="admin-header",
+                        children=[
+                            html.H1("Admin Panel", style={"margin": "0", "color": "#1e3a8a"}),
+                            html.A(
+                                html.Button("Back to Dashboard", className="admin-btn"),
+                                href="/",
+                                style={"textDecoration": "none"},
+                            ),
+                        ],
+                    ),
+                    # ── Card 1: Run Pipeline & Refresh ──
+                    html.Div(
+                        className="admin-card",
+                        children=[
+                            html.H3("\U0001F504 Run Pipeline & Refresh"),
+                            html.P("Run the data pipeline and refresh dashboard data."),
+                            html.Div(
+                                style={"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"},
+                                children=[
+                                    dcc.Dropdown(
+                                        id="admin-refresh-scope",
+                                        options=[
+                                            {"label": info["label"], "value": key}
+                                            for key, info in REFRESH_GROUPS.items()
+                                        ],
+                                        value="all",
+                                        clearable=False,
+                                        style={"width": "200px", "fontSize": "13px"},
+                                    ),
+                                    html.Button("Run Pipeline", id="admin-run-pipeline-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
+                                ],
+                            ),
+                            html.Div(
+                                id="admin-pipeline-progress",
+                                style={"marginTop": "10px", "display": "none"},
+                                children=[
+                                    html.Div(
+                                        style={
+                                            "background": "#e5e7eb", "borderRadius": "4px",
+                                            "height": "18px", "overflow": "hidden",
+                                            "position": "relative", "width": "100%",
+                                        },
+                                        children=[
+                                            html.Div(id="admin-progress-fill", style={
+                                                "width": "0%", "height": "100%",
+                                                "backgroundColor": "#3b82f6", "borderRadius": "4px",
+                                                "transition": "width 0.4s ease",
+                                            }),
+                                            html.Span("0%", id="admin-progress-pct", style={
+                                                "position": "absolute", "top": "0", "left": "50%",
+                                                "transform": "translateX(-50%)", "fontSize": "11px",
+                                                "lineHeight": "18px", "color": "#1f2937", "fontWeight": "600",
+                                            }),
+                                        ],
+                                    ),
+                                    html.Div("", id="admin-progress-text", style={
+                                        "fontSize": "12px", "color": "#6b7280",
+                                        "marginTop": "2px", "textAlign": "center",
+                                    }),
+                                ],
+                            ),
+                            dcc.Interval(id="admin-pipeline-interval", interval=1000, n_intervals=0, disabled=True),
+                            html.Span("", id="admin-pipeline-status", style={"fontSize": "13px", "color": "#16a34a", "marginTop": "6px", "display": "block"}),
+                        ],
+                    ),
+                    # ── Card 2: Backup Snapshot ──
+                    html.Div(
+                        className="admin-card",
+                        children=[
+                            html.H3("\U0001F4BE Backup Snapshot"),
+                            html.P("Export all dashboard tables to an Excel snapshot."),
+                            html.Button("Create Backup", id="admin-backup-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
+                            dcc.Download(id="admin-backup-download"),
+                            html.Span("", id="admin-backup-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
+                        ],
+                    ),
+                    # ── Card 3: Weekly Mail Preview ──
+                    html.Div(
+                        className="admin-card",
+                        children=[
+                            html.H3("\U00002709 Weekly Mail Preview"),
+                            html.P("Regenerate and open the weekly mail HTML preview."),
+                            html.A(
+                                html.Button("Refresh Mail & Open", id="admin-mail-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
+                                href="/mail-preview/latest",
+                                target="_blank",
+                                style={"textDecoration": "none"},
+                            ),
+                        ],
+                    ),
+                    # ── Card 4: Update & Restart ──
+                    html.Div(
+                        className="admin-card",
+                        children=[
+                            html.H3("\U0001F680 Update & Restart"),
+                            html.P("Pull latest code from GitHub, install dependencies, and restart the application. After restart, pipeline will run automatically."),
+                            html.Button("Update & Restart", id="admin-update-btn", n_clicks=0, className="admin-btn admin-btn--danger"),
+                            html.Span("", id="admin-update-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block", "whiteSpace": "pre-wrap"}),
+                        ],
+                    ),
+                ],
             ),
         ],
     )
@@ -4115,9 +4174,223 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             return dash.no_update, "Backup failed, please check server logs."
 
 
+def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
+    """Register all callbacks for the /admin page."""
+
+    # ── Login ──────────────────────────────────────────────────────
+    @app.callback(
+        Output("admin-session", "data"),
+        Output("admin-login-error", "children"),
+        Output("admin-login-box", "style"),
+        Output("admin-panel", "style"),
+        Input("admin-login-btn", "n_clicks"),
+        Input("admin-password-input", "n_submit"),
+        State("admin-password-input", "value"),
+        State("admin-session", "data"),
+        prevent_initial_call=True,
+    )
+    def admin_login(n_clicks, n_submit, password, session):
+        if session and session.get("authenticated"):
+            return dash.no_update, dash.no_update, {"display": "none"}, {"display": "block"}
+        if not password:
+            return dash.no_update, "Please enter a password.", dash.no_update, dash.no_update
+        if password == cfg.admin_password:
+            return {"authenticated": True}, "", {"display": "none"}, {"display": "block"}
+        return dash.no_update, "Incorrect password.", dash.no_update, dash.no_update
+
+    # ── Restore session on page load ──
+    @app.callback(
+        Output("admin-login-box", "style", allow_duplicate=True),
+        Output("admin-panel", "style", allow_duplicate=True),
+        Input("admin-session", "data"),
+        prevent_initial_call=True,
+    )
+    def admin_restore_session(session):
+        if session and session.get("authenticated"):
+            return {"display": "none"}, {"display": "block"}
+        return dash.no_update, dash.no_update
+
+    # ── Run Pipeline ──────────────────────────────────────────────
+    @app.callback(
+        Output("admin-pipeline-status", "children"),
+        Output("admin-pipeline-interval", "disabled"),
+        Output("admin-pipeline-progress", "style"),
+        Output("admin-run-pipeline-btn", "disabled"),
+        Input("admin-run-pipeline-btn", "n_clicks"),
+        State("admin-refresh-scope", "value"),
+        prevent_initial_call=True,
+    )
+    def admin_run_pipeline(n_clicks, scope):
+        if not n_clicks:
+            raise PreventUpdate
+        group = scope or "all"
+        _start_pipeline_subprocess(group)
+        label = REFRESH_GROUPS.get(group, {}).get("label", group)
+        ts = datetime.now().strftime("%H:%M:%S")
+        return (
+            f"\u23f3 Pipeline started at {ts} ({label})",
+            False,   # enable interval
+            {"marginTop": "10px", "display": "block"},
+            True,    # disable button
+        )
+
+    # ── Pipeline progress polling ─────────────────────────────────
+    @app.callback(
+        Output("admin-progress-fill", "style"),
+        Output("admin-progress-pct", "children"),
+        Output("admin-progress-text", "children"),
+        Output("admin-pipeline-status", "children", allow_duplicate=True),
+        Output("admin-pipeline-interval", "disabled", allow_duplicate=True),
+        Output("admin-pipeline-progress", "style", allow_duplicate=True),
+        Output("admin-run-pipeline-btn", "disabled", allow_duplicate=True),
+        Input("admin-pipeline-interval", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def admin_pipeline_progress(n_intervals):
+        _FILL_BASE = {
+            "width": "0%", "height": "100%",
+            "backgroundColor": "#3b82f6", "borderRadius": "4px",
+            "transition": "width 0.4s ease",
+        }
+        progress = _read_pipeline_progress()
+        if progress is None:
+            return (
+                {**_FILL_BASE, "width": "5%"}, "\u2026",
+                "Waiting for pipeline ...",
+                dash.no_update, False,
+                {"marginTop": "10px", "display": "block"}, True,
+            )
+
+        status = progress.get("status", "unknown")
+        done = progress.get("stages_done", 0)
+        total = max(progress.get("stages_total", 1), 1)
+        pct = int(done / total * 100)
+        current_label = progress.get("current_stage_label", "")
+
+        if status == "running":
+            return (
+                {**_FILL_BASE, "width": f"{max(pct, 5)}%"}, f"{pct}%",
+                f"Running: {current_label} ({done}/{total})",
+                dash.no_update, False,
+                {"marginTop": "10px", "display": "block"}, True,
+            )
+        if status == "completed":
+            ts = datetime.now().strftime("%H:%M:%S")
+            completed = progress.get("completed_stages", [])
+            labels = ", ".join(REFRESH_GROUPS.get(s, {}).get("label", s) for s in completed)
+            return (
+                {**_FILL_BASE, "width": "100%"}, "100%", "",
+                f"\u2713 Pipeline completed at {ts} \u2014 {labels}",
+                True,  # stop polling
+                {"marginTop": "10px", "display": "none"},
+                False,  # re-enable button
+            )
+        if status == "error":
+            error_msg = progress.get("error_message", "Unknown error")
+            ts = datetime.now().strftime("%H:%M:%S")
+            return (
+                {**_FILL_BASE, "width": "0%", "backgroundColor": "#ef4444"}, "", "",
+                f"\u2717 Pipeline failed at {ts}: {error_msg}",
+                True, {"marginTop": "10px", "display": "none"}, False,
+            )
+        return (
+            {**_FILL_BASE, "width": "5%"}, "\u2026", "Checking...",
+            dash.no_update, False,
+            {"marginTop": "10px", "display": "block"}, True,
+        )
+
+    # ── Backup Snapshot ───────────────────────────────────────────
+    @app.callback(
+        Output("admin-backup-download", "data"),
+        Output("admin-backup-status", "children"),
+        Input("admin-backup-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def admin_backup(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            snapshot_dir, excel_file, exported_count = create_dashboard_snapshot(cfg)
+            return dcc.send_file(str(excel_file)), f"Backup completed: {snapshot_dir.name} ({exported_count} tables)"
+        except Exception:
+            logging.exception("Failed to create dashboard snapshot")
+            return dash.no_update, "Backup failed, check server logs."
+
+    # ── Update & Restart ──────────────────────────────────────────
+    @app.callback(
+        Output("admin-update-status", "children"),
+        Output("admin-update-btn", "disabled"),
+        Input("admin-update-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def admin_update_restart(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+
+        messages: List[str] = []
+
+        # Step 1: git pull
+        try:
+            pull_result = subprocess.run(
+                ["git", "pull", "origin", "main"],
+                cwd=str(_PROJECT_ROOT),
+                capture_output=True, text=True, timeout=60,
+            )
+            pull_output = (pull_result.stdout or "").strip()
+            messages.append(f"[git pull] {pull_output}")
+            if pull_result.returncode != 0:
+                err = (pull_result.stderr or "").strip()
+                messages.append(f"[git pull ERROR] {err}")
+                return "\n".join(messages), False
+        except Exception as exc:
+            messages.append(f"[git pull EXCEPTION] {exc}")
+            return "\n".join(messages), False
+
+        # Step 2: pip install
+        try:
+            req_file = _PROJECT_ROOT / "requirements.txt"
+            if req_file.exists():
+                pip_result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", str(req_file), "--quiet"],
+                    cwd=str(_PROJECT_ROOT),
+                    capture_output=True, text=True, timeout=120,
+                )
+                messages.append(f"[pip install] return code {pip_result.returncode}")
+                if pip_result.returncode != 0:
+                    err = (pip_result.stderr or "").strip()
+                    messages.append(f"[pip ERROR] {err}")
+        except Exception as exc:
+            messages.append(f"[pip EXCEPTION] {exc}")
+
+        # Step 3: Schedule restart + auto-run pipeline
+        messages.append("[restart] Restarting application in 2 seconds ...")
+        messages.append("Please refresh this page in ~10 seconds.")
+
+        import threading
+
+        def _delayed_restart():
+            import time
+            time.sleep(2)
+            # Write a flag file so the app runs pipeline on startup
+            flag_file = _PROJECT_ROOT / "data" / "processed" / ".run_pipeline_on_start"
+            flag_file.parent.mkdir(parents=True, exist_ok=True)
+            flag_file.write_text("auto", encoding="utf-8")
+            logging.info("Restarting application via os.execv ...")
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+
+        threading.Thread(target=_delayed_restart, daemon=True).start()
+        return "\n".join(messages), True
+
+
 def create_app() -> Dash:
     cfg = AppConfig.load(CONFIG_PATH)
-    app = Dash(__name__, title="Supply Protection Commander", assets_folder=str(Path(__file__).parent / "assets"))
+    app = Dash(
+        __name__,
+        title="Supply Protection Commander",
+        assets_folder=str(Path(__file__).parent / "assets"),
+        suppress_callback_exceptions=True,
+        url_base_pathname="/",
+    )
 
     @app.server.route("/mail-preview/latest", methods=["GET"])
     def mail_preview_latest() -> Response:
@@ -4156,8 +4429,39 @@ def create_app() -> Dash:
         else:
             logging.warning("MATRES_ALLOWED_SUBNETS was set but no valid subnet was parsed.")
 
-    app.layout = build_layout(app, cfg)
+    # ── Pre-build both page layouts ──
+    dashboard_layout = build_layout(app, cfg)
+    admin_layout = build_admin_layout(cfg)
+
+    # ── Root layout with URL routing ──
+    app.layout = html.Div([
+        dcc.Location(id="url", refresh=False),
+        html.Div(id="page-content"),
+    ])
+
+    @app.callback(
+        Output("page-content", "children"),
+        Input("url", "pathname"),
+    )
+    def route_page(pathname):
+        if pathname == "/admin":
+            return admin_layout
+        return dashboard_layout
+
+    # Register all callbacks
     register_callbacks(app, cfg)
+    register_admin_callbacks(app, cfg)
+
+    # ── Auto-run pipeline on restart if flag exists ──
+    flag_file = _PROJECT_ROOT / "data" / "processed" / ".run_pipeline_on_start"
+    if flag_file.exists():
+        try:
+            flag_file.unlink()
+            logging.info("Auto-running pipeline after restart ...")
+            _start_pipeline_subprocess("all")
+        except Exception:
+            logging.exception("Failed to auto-run pipeline on start")
+
     return app
 
 
