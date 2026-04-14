@@ -4407,22 +4407,44 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
             messages.append(f"[pip EXCEPTION] {exc}")
 
         # Step 3: Schedule restart + auto-run pipeline
-        messages.append("[restart] Restarting application in 2 seconds ...")
-        messages.append("Please refresh this page in ~10 seconds.")
+        messages.append("[restart] Restarting application in 3 seconds ...")
+        messages.append("Please refresh this page in ~15 seconds.")
 
         import threading
 
         def _delayed_restart():
             import time
-            time.sleep(2)
+            time.sleep(3)
             # Write a flag file so the app runs pipeline on startup
             flag_file = _PROJECT_ROOT / "data" / "processed" / ".run_pipeline_on_start"
             flag_file.parent.mkdir(parents=True, exist_ok=True)
             flag_file.write_text("auto", encoding="utf-8")
-            logging.info("Restarting application via os.execv ...")
-            os.execv(sys.executable, [sys.executable] + sys.argv)
 
-        threading.Thread(target=_delayed_restart, daemon=True).start()
+            restart_cmd = [sys.executable] + sys.argv
+            logging.info("Restarting application via detached subprocess: %s", restart_cmd)
+
+            if sys.platform == "win32":
+                # On Windows, os.execv() fails in CMD / VS Code terminals.
+                # Spawn a fully detached child process, then exit the parent.
+                DETACHED_PROCESS = 0x00000008
+                CREATE_NEW_PROCESS_GROUP = 0x00000200
+                subprocess.Popen(
+                    restart_cmd,
+                    cwd=str(_PROJECT_ROOT),
+                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    close_fds=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                )
+                logging.info("Detached child process spawned. Exiting parent in 1s ...")
+                time.sleep(1)
+                os._exit(0)
+            else:
+                # On Unix, execv works reliably
+                os.execv(sys.executable, restart_cmd)
+
+        threading.Thread(target=_delayed_restart, daemon=False).start()
         return "\n".join(messages), True
 
     # ── Master Data Update ─────────────────────────────────────────
