@@ -2422,6 +2422,32 @@ def append_history_snapshot(df: pd.DataFrame, cfg: PipelineConfig) -> None:
 # Master Data Update report  ── identify missing Seg mapping & SU factor
 # ---------------------------------------------------------------------------
 
+def _parse_numeric_series(series: pd.Series) -> pd.Series:
+    """Clean and convert a series to numeric (for production volume checks)."""
+    cleaned = (
+        series.fillna("")
+        .astype(str)
+        .str.replace("\u00a0", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
+
+
+def _normalize_month_label_simple(raw_label: str) -> Optional[str]:
+    """Normalise month label from either MM.YYYY or YYYY-MM format."""
+    text = str(raw_label).strip()
+    dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
+    if dot_match:
+        month, year = dot_match.groups()
+        return f"{year}-{month}"
+    dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
+    if dash_match:
+        return text
+    return None
+
+
 def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
     """Scan Production Volume reports and identify materials with missing master data.
 
@@ -2431,10 +2457,13 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
     2. **SU Factor** – WIP materials (from XQTC WIP reports) whose code is NOT
        found in the Parameter file (no 9字头SU mapping).
 
-    Returns a DataFrame with columns: Code, Description, Miss.
+    Only materials that actually have data in Production Data and/or Demand Data
+    are included.  An extra ``Data Source`` column records which data source(s)
+    contain non-zero values for the material.
+
+    Returns a DataFrame with columns: Code, Description, Miss, Data Source.
     """
-    result_columns = ["Code", "Description", "Miss"]
-    records: list[dict] = []
+    result_columns = ["Code", "Description", "Miss", "Data Source"]
 
     production_root = cfg.production_data_dir
     if production_root is None or not production_root.exists():
@@ -2455,6 +2484,28 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
     else:
         parameter_keys = set(xqtc_9su_mapping["material_key"].dropna().astype(str).str.strip())
 
+    # ── Build set of material_keys that have Demand Data ─────────
+    demand_material_keys: set[str] = set()
+    td_csv = cfg.processed_dir / PROCESSED_FILES.get("td_validation_gap_detail", "td_version_gap_details.csv")
+    if td_csv.exists():
+        try:
+            td_df = pd.read_csv(td_csv)
+            if "APO Product" in td_df.columns:
+                td_df["_mk"] = td_df["APO Product"].apply(normalize_material_key)
+                # Only count materials with at least some non-zero Current/Previous/Gap
+                for val_col in ["Current", "Previous"]:
+                    if val_col in td_df.columns:
+                        td_df[val_col] = pd.to_numeric(td_df[val_col], errors="coerce").fillna(0.0)
+                if "Current" in td_df.columns:
+                    has_value = td_df["Current"].abs() > 0
+                elif "Previous" in td_df.columns:
+                    has_value = td_df["Previous"].abs() > 0
+                else:
+                    has_value = pd.Series(False, index=td_df.index)
+                demand_material_keys = set(td_df.loc[has_value, "_mk"].dropna().astype(str).str.strip())
+        except Exception:
+            logging.exception("Failed to read TD gap details for master data report")
+
     # ── Scan all Production Vol reports ──────────────────────────
     all_reports = [
         p for p in production_root.glob("*.xls*")
@@ -2465,8 +2516,9 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
         if "production vol" in p.name.lower()
     ])
 
-    seen_seg: set[str] = set()        # track unique material_key for Seg 缺失
-    seen_su_factor: set[str] = set()  # track unique material_key for SU Factor
+    # Collect candidate materials with their info
+    # key: material_key → {code, description, miss_types: set, has_production: bool}
+    candidates: dict[str, dict] = {}
 
     for report_path in production_vol_reports:
         try:
@@ -2477,7 +2529,7 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
         if raw.empty:
             continue
 
-        # Find Material and Description columns
+        # Find columns
         normalized_map = {str(col).strip().lower(): col for col in raw.columns}
         material_col = None
         for key in ["material"]:
@@ -2504,6 +2556,24 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
                     description_col = col
                     break
 
+        # Detect monthly value columns (after Prev.Perd)
+        prev_perd_col = None
+        for key in ["prev.perd", "prev perd"]:
+            if key in normalized_map:
+                prev_perd_col = normalized_map[key]
+                break
+        month_cols: list[str] = []
+        if prev_perd_col is not None:
+            passed = False
+            for col in raw.columns:
+                if col == prev_perd_col:
+                    passed = True
+                    continue
+                if not passed:
+                    continue
+                if _normalize_month_label_simple(str(col).strip()):
+                    month_cols.append(col)
+
         working = raw[[material_col]].copy()
         working["_material_raw"] = working[material_col].fillna("").astype(str).str.strip()
         working["material_key"] = working["_material_raw"].apply(normalize_material_key)
@@ -2516,42 +2586,76 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
         else:
             working["_description"] = ""
 
-        # De-duplicate by material_key within this report
-        working = working.drop_duplicates(subset=["material_key"], keep="first")
+        # Compute whether each row has non-zero production data
+        if month_cols:
+            month_sum = pd.Series(0.0, index=working.index)
+            for mc in month_cols:
+                if mc in raw.columns:
+                    month_sum = month_sum + _parse_numeric_series(raw.loc[working.index, mc]).abs()
+            working["_has_prod_value"] = month_sum > 0
+        else:
+            working["_has_prod_value"] = False
 
         report_name_lower = report_path.name.lower()
         is_xqtc_report = "xqtc" in report_name_lower
         is_xqtc_wip = is_xqtc_report and "wip" in report_name_lower
 
-        # ── Check 1: Seg 缺失 (missing segment mapping) ──
         for _, row in working.iterrows():
             mk = str(row["material_key"]).strip()
-            if mk in seen_seg:
-                continue
-            if mk not in seg_mapped_keys:
-                seen_seg.add(mk)
-                records.append({
-                    "Code": row["_material_raw"],
-                    "Description": row["_description"],
-                    "Miss": "Seg 缺失",
-                })
+            has_prod = bool(row["_has_prod_value"])
 
-        # ── Check 2: SU Factor (only for XQTC WIP) ──
-        if is_xqtc_wip:
-            for _, row in working.iterrows():
-                mk = str(row["material_key"]).strip()
-                if mk in seen_su_factor:
-                    continue
-                if mk not in parameter_keys:
-                    seen_su_factor.add(mk)
-                    records.append({
-                        "Code": row["_material_raw"],
-                        "Description": row["_description"],
-                        "Miss": "SU Factor",
-                    })
+            if mk not in candidates:
+                candidates[mk] = {
+                    "code": row["_material_raw"],
+                    "description": row["_description"],
+                    "miss_types": set(),
+                    "has_production": False,
+                }
+            entry = candidates[mk]
+            if has_prod:
+                entry["has_production"] = True
+            # Update description if previously empty
+            if not entry["description"] and row["_description"]:
+                entry["description"] = row["_description"]
+
+            # ── Check 1: Seg 缺失 ──
+            if mk not in seg_mapped_keys:
+                entry["miss_types"].add("Seg 缺失")
+
+            # ── Check 2: SU Factor (only XQTC WIP) ──
+            if is_xqtc_wip and mk not in parameter_keys:
+                entry["miss_types"].add("SU Factor")
+
+    # ── Build final records, filtering by data presence ──────────
+    records: list[dict] = []
+    for mk, entry in candidates.items():
+        if not entry["miss_types"]:
+            continue
+
+        has_production = entry["has_production"]
+        has_demand = mk in demand_material_keys
+
+        # Skip materials with no data in either source
+        if not has_production and not has_demand:
+            continue
+
+        # Build Data Source label
+        sources: list[str] = []
+        if has_production:
+            sources.append("Production Data")
+        if has_demand:
+            sources.append("Demand Data")
+        data_source = " / ".join(sources)
+
+        for miss_type in sorted(entry["miss_types"]):
+            records.append({
+                "Code": entry["code"],
+                "Description": entry["description"],
+                "Miss": miss_type,
+                "Data Source": data_source,
+            })
 
     report = pd.DataFrame(records, columns=result_columns)
-    # Sort by Miss type then Code
     if not report.empty:
         miss_order = {"Seg 缺失": 0, "SU Factor": 1}
         report["_sort"] = report["Miss"].map(miss_order).fillna(99)

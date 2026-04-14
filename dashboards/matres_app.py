@@ -4445,6 +4445,7 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
                     {"name": "Code", "id": "Code"},
                     {"name": "Description", "id": "Description"},
                     {"name": "Miss", "id": "Miss"},
+                    {"name": "Data Source", "id": "Data Source"},
                 ],
                 data=report_df.to_dict("records"),
                 style_header=PDE_STYLE_HEADER,
@@ -4461,11 +4462,20 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
                         "color": "#d97706",
                         "fontWeight": "700",
                     },
+                    {
+                        "if": {"filter_query": '{Data Source} contains "Production Data"', "column_id": "Data Source"},
+                        "color": "#2563eb",
+                    },
+                    {
+                        "if": {"filter_query": '{Data Source} contains "Demand Data"', "column_id": "Data Source"},
+                        "color": "#7c3aed",
+                    },
                 ],
                 style_cell_conditional=[
                     {"if": {"column_id": "Code"}, "textAlign": "left", "minWidth": "100px", "width": "120px"},
                     {"if": {"column_id": "Description"}, "textAlign": "left", "minWidth": "250px", "width": "400px"},
                     {"if": {"column_id": "Miss"}, "textAlign": "center", "minWidth": "100px", "width": "120px"},
+                    {"if": {"column_id": "Data Source"}, "textAlign": "center", "minWidth": "140px", "width": "180px"},
                 ],
                 page_size=20,
                 sort_action="native",
