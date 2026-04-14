@@ -2419,6 +2419,147 @@ def append_history_snapshot(df: pd.DataFrame, cfg: PipelineConfig) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Master Data Update report  ── identify missing Seg mapping & SU factor
+# ---------------------------------------------------------------------------
+
+def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
+    """Scan Production Volume reports and identify materials with missing master data.
+
+    Two categories of missing data are detected:
+    1. **Seg 缺失** – materials in Production Vol reports whose code is NOT found
+       in the Level-1 (Seg summary) mapping.
+    2. **SU Factor** – WIP materials (from XQTC WIP reports) whose code is NOT
+       found in the Parameter file (no 9字头SU mapping).
+
+    Returns a DataFrame with columns: Code, Description, Miss.
+    """
+    result_columns = ["Code", "Description", "Miss"]
+    records: list[dict] = []
+
+    production_root = cfg.production_data_dir
+    if production_root is None or not production_root.exists():
+        logging.warning("Production data dir %s not found; skipping master data report", production_root)
+        return pd.DataFrame(columns=result_columns)
+
+    # ── Read reference data ──────────────────────────────────────
+    level1_mapping = read_level1_mapping(cfg)
+    level_col = cfg.level1_first_level_column
+    if level_col not in level1_mapping.columns:
+        seg_mapped_keys: set = set()
+    else:
+        seg_mapped_keys = set(level1_mapping["material_key"].dropna().astype(str).str.strip())
+
+    xqtc_9su_mapping = read_xqtc_9su_mapping(production_root)
+    if xqtc_9su_mapping.empty:
+        parameter_keys: set = set()
+    else:
+        parameter_keys = set(xqtc_9su_mapping["material_key"].dropna().astype(str).str.strip())
+
+    # ── Scan all Production Vol reports ──────────────────────────
+    all_reports = [
+        p for p in production_root.glob("*.xls*")
+        if p.is_file() and not p.name.startswith("~$")
+    ]
+    production_vol_reports = sorted([
+        p for p in all_reports
+        if "production vol" in p.name.lower()
+    ])
+
+    seen_seg: set[str] = set()        # track unique material_key for Seg 缺失
+    seen_su_factor: set[str] = set()  # track unique material_key for SU Factor
+
+    for report_path in production_vol_reports:
+        try:
+            raw = read_production_volume_report(report_path)
+        except Exception:
+            logging.exception("Master data report: failed to read %s", report_path)
+            continue
+        if raw.empty:
+            continue
+
+        # Find Material and Description columns
+        normalized_map = {str(col).strip().lower(): col for col in raw.columns}
+        material_col = None
+        for key in ["material"]:
+            if key in normalized_map:
+                material_col = normalized_map[key]
+                break
+        if material_col is None:
+            for col in raw.columns:
+                if "material" in str(col).strip().lower() and "description" not in str(col).strip().lower():
+                    material_col = col
+                    break
+        if material_col is None:
+            continue
+
+        description_col = None
+        for key in ["material description", "description", "des"]:
+            if key in normalized_map:
+                description_col = normalized_map[key]
+                break
+        if description_col is None:
+            for col in raw.columns:
+                col_lower = str(col).strip().lower()
+                if "description" in col_lower or col_lower == "des":
+                    description_col = col
+                    break
+
+        working = raw[[material_col]].copy()
+        working["_material_raw"] = working[material_col].fillna("").astype(str).str.strip()
+        working["material_key"] = working["_material_raw"].apply(normalize_material_key)
+        working = working[working["material_key"].astype(bool)].copy()
+        if working.empty:
+            continue
+
+        if description_col is not None and description_col in raw.columns:
+            working["_description"] = raw.loc[working.index, description_col].fillna("").astype(str).str.strip()
+        else:
+            working["_description"] = ""
+
+        # De-duplicate by material_key within this report
+        working = working.drop_duplicates(subset=["material_key"], keep="first")
+
+        report_name_lower = report_path.name.lower()
+        is_xqtc_report = "xqtc" in report_name_lower
+        is_xqtc_wip = is_xqtc_report and "wip" in report_name_lower
+
+        # ── Check 1: Seg 缺失 (missing segment mapping) ──
+        for _, row in working.iterrows():
+            mk = str(row["material_key"]).strip()
+            if mk in seen_seg:
+                continue
+            if mk not in seg_mapped_keys:
+                seen_seg.add(mk)
+                records.append({
+                    "Code": row["_material_raw"],
+                    "Description": row["_description"],
+                    "Miss": "Seg 缺失",
+                })
+
+        # ── Check 2: SU Factor (only for XQTC WIP) ──
+        if is_xqtc_wip:
+            for _, row in working.iterrows():
+                mk = str(row["material_key"]).strip()
+                if mk in seen_su_factor:
+                    continue
+                if mk not in parameter_keys:
+                    seen_su_factor.add(mk)
+                    records.append({
+                        "Code": row["_material_raw"],
+                        "Description": row["_description"],
+                        "Miss": "SU Factor",
+                    })
+
+    report = pd.DataFrame(records, columns=result_columns)
+    # Sort by Miss type then Code
+    if not report.empty:
+        miss_order = {"Seg 缺失": 0, "SU Factor": 1}
+        report["_sort"] = report["Miss"].map(miss_order).fillna(99)
+        report = report.sort_values(["_sort", "Code"]).drop(columns=["_sort"]).reset_index(drop=True)
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Staged pipeline execution  ── individual stage runners
 # ---------------------------------------------------------------------------
 

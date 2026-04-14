@@ -3616,6 +3616,31 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
                             html.Span("", id="admin-update-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block", "whiteSpace": "pre-wrap"}),
                         ],
                     ),
+                    # ── Card 5: Master Data Update ──
+                    html.Div(
+                        className="admin-card",
+                        children=[
+                            html.H3("\U0001F50D Master Data Update"),
+                            html.P("Scan Production Volume data for materials missing Seg mapping or SU Factor in Parameter."),
+                            html.Div(
+                                style={"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"},
+                                children=[
+                                    html.Button("Scan Missing Data", id="admin-masterdata-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
+                                    html.Button("Export to Excel", id="admin-masterdata-export-btn", n_clicks=0, className="admin-btn"),
+                                ],
+                            ),
+                            dcc.Download(id="admin-masterdata-download"),
+                            html.Span("", id="admin-masterdata-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
+                            dcc.Loading(
+                                html.Div(
+                                    id="admin-masterdata-table-wrapper",
+                                    style={"marginTop": "10px"},
+                                    children=[],
+                                ),
+                            ),
+                            dcc.Store(id="admin-masterdata-store", data=None),
+                        ],
+                    ),
                 ],
             ),
         ],
@@ -4380,6 +4405,100 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
 
         threading.Thread(target=_delayed_restart, daemon=True).start()
         return "\n".join(messages), True
+
+    # ── Master Data Update ─────────────────────────────────────────
+    @app.callback(
+        Output("admin-masterdata-table-wrapper", "children"),
+        Output("admin-masterdata-status", "children"),
+        Output("admin-masterdata-store", "data"),
+        Input("admin-masterdata-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def admin_masterdata_scan(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            # Import pipeline functions to build the report
+            sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
+            from matres_pipeline import PipelineConfig, build_master_data_update_report
+
+            pipeline_cfg = PipelineConfig.from_dict(
+                json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            )
+            report_df = build_master_data_update_report(pipeline_cfg)
+
+            if report_df.empty:
+                return (
+                    html.P("\u2705 No missing master data found. All materials are mapped.",
+                           style={"color": "#16a34a", "fontWeight": "600"}),
+                    "",
+                    None,
+                )
+
+            seg_count = int((report_df["Miss"] == "Seg \u7f3a\u5931").sum())
+            su_count = int((report_df["Miss"] == "SU Factor").sum())
+            status_text = f"Found {len(report_df)} items: {seg_count} Seg \u7f3a\u5931, {su_count} SU Factor"
+
+            table = DataTable(
+                id="admin-masterdata-result-table",
+                columns=[
+                    {"name": "Code", "id": "Code"},
+                    {"name": "Description", "id": "Description"},
+                    {"name": "Miss", "id": "Miss"},
+                ],
+                data=report_df.to_dict("records"),
+                style_header=PDE_STYLE_HEADER,
+                style_cell=PDE_STYLE_CELL,
+                style_data_conditional=[
+                    *PDE_STYLE_DATA_CONDITIONAL,
+                    {
+                        "if": {"filter_query": '{Miss} = "Seg \u7f3a\u5931"', "column_id": "Miss"},
+                        "color": "#dc2626",
+                        "fontWeight": "700",
+                    },
+                    {
+                        "if": {"filter_query": '{Miss} = "SU Factor"', "column_id": "Miss"},
+                        "color": "#d97706",
+                        "fontWeight": "700",
+                    },
+                ],
+                style_cell_conditional=[
+                    {"if": {"column_id": "Code"}, "textAlign": "left", "minWidth": "100px", "width": "120px"},
+                    {"if": {"column_id": "Description"}, "textAlign": "left", "minWidth": "250px", "width": "400px"},
+                    {"if": {"column_id": "Miss"}, "textAlign": "center", "minWidth": "100px", "width": "120px"},
+                ],
+                page_size=20,
+                sort_action="native",
+                filter_action="native",
+                style_table={"overflowX": "auto", "maxHeight": "500px", "overflowY": "auto"},
+            )
+
+            return table, status_text, report_df.to_dict("records")
+        except Exception:
+            logging.exception("Failed to scan master data")
+            return html.P("Scan failed. Check server logs.", style={"color": "#dc2626"}), "", None
+
+    @app.callback(
+        Output("admin-masterdata-download", "data"),
+        Input("admin-masterdata-export-btn", "n_clicks"),
+        State("admin-masterdata-store", "data"),
+        prevent_initial_call=True,
+    )
+    def admin_masterdata_export(n_clicks, store_data):
+        if not n_clicks or not store_data:
+            raise PreventUpdate
+        try:
+            report_df = pd.DataFrame(store_data)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            out_dir = cfg.processed_dir.parent / "history" / "master_data_reports"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            excel_path = out_dir / f"master_data_update_{timestamp}.xlsx"
+            with pd.ExcelWriter(str(excel_path), engine="openpyxl") as writer:
+                report_df.to_excel(writer, sheet_name="Missing Master Data", index=False)
+            return dcc.send_file(str(excel_path))
+        except Exception:
+            logging.exception("Failed to export master data report")
+            raise PreventUpdate
 
 
 def create_app() -> Dash:
