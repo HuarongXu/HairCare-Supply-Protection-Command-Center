@@ -3462,18 +3462,37 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                             html.H1("Hair Care Supply Protection Command Center"),
                         ]
                     ),
-                    html.A(
-                        html.Span("\u2699", style={
-                            "fontSize": "22px",
-                            "color": "#94a3b8",
-                            "cursor": "pointer",
-                            "padding": "4px 8px",
-                            "borderRadius": "8px",
-                            "transition": "color 0.2s",
-                        }),
-                        href="/admin",
-                        title="Admin Panel",
-                        style={"textDecoration": "none", "marginLeft": "auto", "alignSelf": "center"},
+                    html.Div(
+                        style={"display": "flex", "gap": "6px", "marginLeft": "auto", "alignSelf": "center", "alignItems": "center"},
+                        children=[
+                            html.A(
+                                html.Span("\U0001F4D6", style={
+                                    "fontSize": "18px",
+                                    "color": "#94a3b8",
+                                    "cursor": "pointer",
+                                    "padding": "4px 8px",
+                                    "borderRadius": "8px",
+                                    "transition": "color 0.2s",
+                                }),
+                                href="/docs/user-guide",
+                                target="_blank",
+                                title="User Guide",
+                                style={"textDecoration": "none"},
+                            ),
+                            html.A(
+                                html.Span("\u2699", style={
+                                    "fontSize": "22px",
+                                    "color": "#94a3b8",
+                                    "cursor": "pointer",
+                                    "padding": "4px 8px",
+                                    "borderRadius": "8px",
+                                    "transition": "color 0.2s",
+                                }),
+                                href="/admin",
+                                title="Admin Panel",
+                                style={"textDecoration": "none"},
+                            ),
+                        ],
                     ),
                 ],
             ),
@@ -4520,6 +4539,13 @@ def create_app() -> Dash:
         suppress_callback_exceptions=True,
         url_base_pathname="/",
     )
+
+    @app.server.route("/docs/user-guide", methods=["GET"])
+    def serve_user_guide() -> Response:
+        guide_path = _PROJECT_ROOT / "docs" / "user_guide.html"
+        if guide_path.exists():
+            return Response(guide_path.read_text(encoding="utf-8"), mimetype="text/html; charset=utf-8")
+        return Response("User guide not found.", status=404)
 
     @app.server.route("/mail-preview/latest", methods=["GET"])
     def mail_preview_latest() -> Response:
