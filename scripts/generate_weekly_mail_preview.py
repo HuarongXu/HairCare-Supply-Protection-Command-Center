@@ -91,7 +91,7 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
     Returns a dict with keys 'demand_assumption' and 'supply_protection',
     values are Path objects (or None on failure).
     """
-    result = {'demand_assumption': None, 'supply_protection': None}
+    result = {'demand_assumption': None, 'supply_protection': None, 'pde_alert': None}
     try:
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
@@ -139,6 +139,21 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
         driver.save_screenshot(str(supply_path))
         result['supply_protection'] = supply_path
         print(f'screenshot: {supply_path.name}')
+
+        # 3. PDE Alert screenshot — show only PDE panel, hide everything else
+        driver.execute_script("""
+            // Show PDE panel back
+            var panels = document.querySelectorAll('.pde-panel');
+            panels.forEach(function(p){ p.style.display = ''; });
+            // Hide non-PDE sections (summary panels)
+            var summaries = document.querySelectorAll('.summary-panel');
+            summaries.forEach(function(s){ s.style.display = 'none'; });
+        """)
+        time.sleep(1)
+        pde_path = out_dir / 'pde_alert.png'
+        driver.save_screenshot(str(pde_path))
+        result['pde_alert'] = pde_path
+        print(f'screenshot: {pde_path.name}')
 
     except Exception as e:
         print(f'screenshot capture failed: {e}')
@@ -277,7 +292,7 @@ out_dir.mkdir(parents=True, exist_ok=True)
 screenshots = capture_dashboard_screenshots(out_dir)
 
 # Auto-crop whitespace from screenshots
-for key in ('demand_assumption', 'supply_protection'):
+for key in ('demand_assumption', 'supply_protection', 'pde_alert'):
     if screenshots.get(key) and screenshots[key].exists():
         autocrop_screenshot(screenshots[key])
 
@@ -293,6 +308,12 @@ if screenshots.get('supply_protection') and screenshots['supply_protection'].exi
     supply_b64 = image_to_base64(screenshots['supply_protection'])
     if supply_b64:
         supply_img_tag = f'<img src="{supply_b64}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px;" alt="Supply Protection" />'
+
+pde_img_tag = ''
+if screenshots.get('pde_alert') and screenshots['pde_alert'].exists():
+    pde_b64 = image_to_base64(screenshots['pde_alert'])
+    if pde_b64:
+        pde_img_tag = f'<img src="{pde_b64}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px;" alt="PDE Alert" />'
 
 # ===========================================================================
 # Build HTML — matching real Outlook email structure
@@ -339,6 +360,7 @@ supply_inventory_line = f"Total: {fmt_msu(supply_total)} msu; FG: {fmt_msu(fg)} 
 # Screenshot or placeholder text
 demand_screenshot_html = demand_img_tag if demand_img_tag else '<p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste dashboard screenshot here)</i></p>'
 supply_screenshot_html = supply_img_tag if supply_img_tag else '<p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste dashboard screenshot here)</i></p>'
+pde_screenshot_html = pde_img_tag if pde_img_tag else '<p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste PDE screenshot here)</i></p>'
 
 # ---------------------------------------------------------------------------
 # Outlook-friendly HTML template (inline styles, no CSS classes)
@@ -405,9 +427,8 @@ html = f"""<!doctype html>
     <br/>
 
     <!-- PDE Alert -->
-    <p style="font-size:14px;margin:18px 0 0 0;">
-      <b>PDE Alert:</b>
-    </p>
+    <p style="font-size:14px;font-weight:700;color:#1e3a8a;margin:18px 0 6px 0;">PDE Alert:</p>
+    {pde_screenshot_html}
 
     <!-- Footer -->
     <p style="font-size:11px;color:#9ca3af;margin:24px 0 0 0;">
@@ -434,3 +455,5 @@ if screenshots.get('demand_assumption'):
     print(f'screenshot_demand={screenshots["demand_assumption"]}')
 if screenshots.get('supply_protection'):
     print(f'screenshot_supply={screenshots["supply_protection"]}')
+if screenshots.get('pde_alert'):
+    print(f'screenshot_pde={screenshots["pde_alert"]}')
