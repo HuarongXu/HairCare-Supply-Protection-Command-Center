@@ -29,6 +29,23 @@ CONFIG_PATH = Path(os.getenv("MATRES_CONFIG", "config/config.json"))
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PIPELINE_SCRIPT = _PROJECT_ROOT / "scripts" / "matres_pipeline.py"
 _PIPELINE_PROGRESS_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_progress.json"
+_DATA_VERSION_FILE = _PROJECT_ROOT / "data" / "processed" / ".data_version"
+
+
+def _read_data_version() -> str:
+    """Read the server-side data version (timestamp string)."""
+    try:
+        return _DATA_VERSION_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def _write_data_version() -> str:
+    """Write a new data version timestamp. Returns the version string."""
+    ts = datetime.now().isoformat()
+    _DATA_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _DATA_VERSION_FILE.write_text(ts, encoding="utf-8")
+    return ts
 
 
 @dataclass
@@ -3444,6 +3461,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
             dcc.Interval(id="force-refresh-poll", interval=5000, n_intervals=0),
             dcc.Store(id="data-store", data=data_bundle),
             dcc.Store(id="details-version-store", data={"version": details_version}),
+            dcc.Store(id="data-version-store", data=_read_data_version()),
             # --- hidden placeholders that admin callbacks target ---
             dcc.Dropdown(id="refresh-scope-dropdown", value="all", style={"display": "none"}),
             html.Button(id="manual-refresh-btn", n_clicks=0, style={"display": "none"}),
@@ -3760,6 +3778,7 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             if status == "completed":
                 # Pipeline finished → reload data from new CSVs
                 bundle = load_data_bundle(cfg)
+                _write_data_version()  # notify all browsers
                 ts = datetime.now().strftime("%H:%M:%S")
                 completed_stages = progress.get("completed_stages", [])
                 labels = ", ".join(
@@ -3816,23 +3835,21 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             dash.no_update,
         )
 
-    # ── Force-refresh poll (triggered by Admin "Refresh Data") ────
+    # ── Data-version poll (detects server-side data changes) ────
     @app.callback(
         Output("data-store", "data", allow_duplicate=True),
         Output("details-version-store", "data", allow_duplicate=True),
+        Output("data-version-store", "data", allow_duplicate=True),
         Input("force-refresh-poll", "n_intervals"),
+        State("data-version-store", "data"),
         prevent_initial_call=True,
     )
-    def force_refresh_poll(n):
-        flag = _PROJECT_ROOT / "data" / "processed" / ".force_data_refresh"
-        if not flag.exists():
+    def force_refresh_poll(n, client_version):
+        server_version = _read_data_version()
+        if not server_version or server_version == (client_version or ""):
             raise PreventUpdate
-        try:
-            flag.unlink(missing_ok=True)
-        except Exception:
-            pass
         bundle = load_data_bundle(cfg)
-        return bundle, {"version": bundle.get("request_details_version")}
+        return bundle, {"version": bundle.get("request_details_version")}, server_version
 
     @app.callback(
         Output("metric-total-msu", "children"),
@@ -4384,14 +4401,12 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
             raise PreventUpdate
         try:
             bundle = load_data_bundle(cfg)
-            # Write flag so dashboard polls pick it up within seconds
-            flag = _PROJECT_ROOT / "data" / "processed" / ".force_data_refresh"
-            flag.parent.mkdir(parents=True, exist_ok=True)
-            flag.write_text(datetime.now().isoformat(), encoding="utf-8")
+            # Write data version so ALL connected dashboards detect and refresh
+            _write_data_version()
             n_details = len(bundle.get("pde_alerts", []))
             n_items = len(pd.DataFrame(bundle.get("monthly_item", []))["Item Text"].unique()) if bundle.get("monthly_item") else 0
             ts = datetime.now().strftime("%H:%M:%S")
-            return f"\u2713 Data refreshed at {ts} \u2014 {n_items} items, {n_details} PDE alerts. Dashboard will update within seconds.", False
+            return f"\u2713 Data refreshed at {ts} \u2014 {n_items} items, {n_details} PDE alerts. All dashboards will update within seconds.", False
         except Exception:
             logging.exception("Failed to refresh data")
             return "\u2717 Refresh failed, check server logs.", False
