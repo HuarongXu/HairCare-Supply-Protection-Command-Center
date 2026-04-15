@@ -92,23 +92,23 @@ q_total = next((r for r in q_rows if str(r.get('Prod Line', '')).strip().lower()
 
 q_tags = []
 for col in q_cols:
-    name = str(col.get('name', ''))
-    m = re.match(r'^([A-Z]{3}) LBE$', name)
+    col_id = str(col.get('id', ''))
+    m = re.match(r'^([A-Z]{3}) LBE$', col_id)
     if m:
         q_tags.append(m.group(1))
 q_tags = list(dict.fromkeys(q_tags))
 
 quarter_tag = q_tags[0] if q_tags else 'Current Quarter'
 q_lbe = to_num(q_total.get(f'{quarter_tag} LBE', 0))
-q_hs = to_num(q_total.get(f'{quarter_tag} HS', 0))
+q_hs = to_num(q_total.get(f'{quarter_tag} DSL+SSP', 0))
 q_lbe_iya = to_num(q_total.get(f'{quarter_tag} LBE IYA', 0))
-q_hs_iya = to_num(q_total.get(f'{quarter_tag} HS IYA', 0))
+q_hs_iya = to_num(q_total.get(f'{quarter_tag} DSL+SSP IYA', 0))
 
 next_quarter_tag = q_tags[1] if len(q_tags) > 1 else ''
 next_q_lbe = to_num(q_total.get(f'{next_quarter_tag} LBE', 0)) if next_quarter_tag else 0.0
-next_q_hs = to_num(q_total.get(f'{next_quarter_tag} HS', 0)) if next_quarter_tag else 0.0
+next_q_hs = to_num(q_total.get(f'{next_quarter_tag} DSL+SSP', 0)) if next_quarter_tag else 0.0
 next_q_lbe_iya = to_num(q_total.get(f'{next_quarter_tag} LBE IYA', 0)) if next_quarter_tag else 0.0
-next_q_hs_iya = to_num(q_total.get(f'{next_quarter_tag} HS IYA', 0)) if next_quarter_tag else 0.0
+next_q_hs_iya = to_num(q_total.get(f'{next_quarter_tag} DSL+SSP IYA', 0)) if next_quarter_tag else 0.0
 
 # Supply protection: all months total (not restricted to current month)
 if not monthly_item.empty:
