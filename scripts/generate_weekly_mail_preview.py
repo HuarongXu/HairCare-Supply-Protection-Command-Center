@@ -451,20 +451,29 @@ html = f"""<!doctype html>
   <script>
   function copyEmail() {{
     var content = document.getElementById('emailContent');
-    var range = document.createRange();
-    range.selectNodeContents(content);
-    var sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    try {{
-      document.execCommand('copy');
+    var htmlStr = content.innerHTML;
+    // Wrap in a full HTML snippet so Outlook keeps inline styles
+    var wrapped = '<html><body style="font-family:Calibri,Arial,sans-serif;color:#1f2937;line-height:1.6;">' + htmlStr + '</body></html>';
+    var htmlBlob = new Blob([wrapped], {{type: 'text/html'}});
+    var textBlob = new Blob([content.innerText], {{type: 'text/plain'}});
+    var item = new ClipboardItem({{'text/html': htmlBlob, 'text/plain': textBlob}});
+    navigator.clipboard.write([item]).then(function() {{
       var msg = document.getElementById('copyMsg');
       msg.style.display = 'inline';
       setTimeout(function(){{ msg.style.display = 'none'; }}, 2000);
-    }} catch(e) {{
-      alert('Copy failed: ' + e);
-    }}
-    sel.removeAllRanges();
+    }}).catch(function(e) {{
+      // Fallback: execCommand
+      var range = document.createRange();
+      range.selectNodeContents(content);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      document.execCommand('copy');
+      sel.removeAllRanges();
+      var msg = document.getElementById('copyMsg');
+      msg.style.display = 'inline';
+      setTimeout(function(){{ msg.style.display = 'none'; }}, 2000);
+    }});
   }}
   </script>
 </body>
