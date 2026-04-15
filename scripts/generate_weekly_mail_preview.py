@@ -115,6 +115,11 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
         # 1. Demand Assumption tab (default tab)
         driver.get(dashboard_url)
         time.sleep(10)
+
+        # Set page zoom to 90% so tables are not clipped / overlapping
+        driver.execute_script("document.body.style.zoom = '0.9';")
+        time.sleep(1)
+
         demand_path = out_dir / 'demand_assumption.png'
         driver.save_screenshot(str(demand_path))
         result['demand_assumption'] = demand_path
