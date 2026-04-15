@@ -292,34 +292,38 @@ if screenshots.get('supply_protection') and screenshots['supply_protection'].exi
 run_date = datetime.now().strftime('%Y%m%d')
 
 # ── Demand System LBE sub-bullet ──────────────────────────────────────────
-# Format: "Apr System LBE: 4,388 msu / IYA 120.7%, AMJ System LBE: 13.26 Mmsu / IYA 99.4%,"
+# Bold month/quarter tags and numeric values for readability
 demand_lbe_parts = [
-    f"{month_text} System LBE: {fmt_msu(lbe_month)} msu / IYA {fmt_iya(lbe_iya_month)}"
+    f"<b>{month_text}</b> System LBE: <b>{fmt_msu(lbe_month)} msu</b> / IYA <b>{fmt_iya(lbe_iya_month)}</b>"
 ]
 if quarter_tag:
     demand_lbe_parts.append(
-        f"{quarter_tag} System LBE: {fmt_mmsu(q_lbe)} Mmsu / IYA {fmt_iya(q_lbe_iya)}"
+        f"<b>{quarter_tag}</b> System LBE: <b>{fmt_mmsu(q_lbe)} Mmsu</b> / IYA <b>{fmt_iya(q_lbe_iya)}</b>"
     )
 if next_quarter_tag:
     demand_lbe_parts.append(
-        f"{next_quarter_tag} System LBE: {fmt_mmsu(next_q_lbe)} Mmsu / IYA {fmt_iya(next_q_lbe_iya)}"
+        f"<b>{next_quarter_tag}</b> System LBE: <b>{fmt_mmsu(next_q_lbe)} Mmsu</b> / IYA <b>{fmt_iya(next_q_lbe_iya)}</b>"
     )
 demand_lbe_line = ", ".join(demand_lbe_parts) + "."
 
-# ── Supply Protection sub-bullet (HS / DSL+SSP values) ────────────────────
-# Format: "Apr System LBE + Supply System Protection: 5,560 msu / IYA 152.9%. AMJ ..."
-supply_hs_parts = [
-    f"{month_text} System LBE + Supply System Protection: {fmt_msu(hs_month)} msu / IYA {fmt_iya(hs_iya_month)}"
-]
+# ── Supply Protection sub-bullets (one <li> per line) ─────────────────────
+# Month line always present; each quarter gets its own <li>
+supply_month_line = (
+    f"<b>{month_text}</b> System LBE + Supply System Protection: "
+    f"<b>{fmt_msu(hs_month)} msu</b> / IYA <b>{fmt_iya(hs_iya_month)}</b>."
+)
+supply_quarter_line = ''
 if quarter_tag:
-    supply_hs_parts.append(
-        f"{quarter_tag} System LBE + Supply System Protection: {fmt_mmsu(q_hs)} Mmsu / IYA {fmt_iya(q_hs_iya)}"
+    supply_quarter_line = (
+        f"<b>{quarter_tag}</b> System LBE + Supply System Protection: "
+        f"<b>{fmt_mmsu(q_hs)} Mmsu</b> / IYA <b>{fmt_iya(q_hs_iya)}</b>."
     )
+supply_next_quarter_line = ''
 if next_quarter_tag:
-    supply_hs_parts.append(
-        f"{next_quarter_tag} System LBE + Supply System Protection: {fmt_mmsu(next_q_hs)} Mmsu / IYA {fmt_iya(next_q_hs_iya)}"
+    supply_next_quarter_line = (
+        f"<b>{next_quarter_tag}</b> System LBE + Supply System Protection: "
+        f"<b>{fmt_mmsu(next_q_hs)} Mmsu</b> / IYA <b>{fmt_iya(next_q_hs_iya)}</b>."
     )
-supply_hs_line = ". ".join(supply_hs_parts) + "."
 
 # Supply inventory line
 supply_inventory_line = f"Total: {fmt_msu(supply_total)} msu; FG: {fmt_msu(fg)} msu; Material: {fmt_msu(material)} msu."
@@ -364,7 +368,9 @@ html = f"""<!doctype html>
     <ul style="list-style-type:disc;margin:4px 0 0 20px;padding:0;">
       <li style="margin:4px 0;font-size:14px;"><b>Supply Protection:</b>
         <ul style="list-style-type:circle;margin:4px 0 0 20px;padding:0;">
-          <li style="margin:2px 0;font-size:14px;">{supply_hs_line}</li>
+          <li style="margin:2px 0;font-size:14px;">{supply_month_line}</li>
+{('          <li style="margin:2px 0;font-size:14px;">' + supply_quarter_line + '</li>') if supply_quarter_line else ''}
+{('          <li style="margin:2px 0;font-size:14px;">' + supply_next_quarter_line + '</li>') if supply_next_quarter_line else ''}
         </ul>
       </li>
     </ul>
