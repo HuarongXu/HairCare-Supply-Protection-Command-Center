@@ -222,17 +222,23 @@ CLI 用法：
 ### 11.0 Admin Panel（`/admin`）
 后台管理面板，密码保护（默认密码在 `config/config.json` 的 `admin_password` 字段，当前为 `HR`）。
 
-包含 5 张功能卡片：
+包含 6 张功能卡片：
 
 | 卡片 | 功能 | 说明 |
 |------|------|------|
 | 1. Run Pipeline & Refresh | 选择数据范围 + 一键运行 Pipeline | 实时进度条显示阶段和百分比 |
-| 2. Backup Snapshot | 导出看板快照 | Excel + CSV 存入 `data/history/dashboard_snapshots/` |
-| 3. Weekly Mail Preview | 刷新周报邮件 | 在新标签页打开 HTML 预览 |
-| 4. Update & Restart | 远程更新代码并重启 | git pull → pip install → 自动重启 → 自动运行 Pipeline |
-| 5. Master Data Update | 扫描缺失主数据 | 扫描 Seg 缺失 + SU Factor 缺失，支持导出 Excel |
+| 2. Refresh Data | 仅刷新数据，不运行 Pipeline | 看板数据在几秒内自动更新 |
+| 3. Backup Snapshot | 导出看板快照 | Excel + CSV 存入 `data/history/dashboard_snapshots/` |
+| 4. Weekly Mail Preview | 刷新周报邮件 | 在新标签页打开 HTML 预览 |
+| 5. Update & Restart | 远程更新代码并重启 | git pull → pip install → 自动重启 → 自动运行 Pipeline |
+| 6. Master Data Update | 扫描缺失主数据 | 扫描 Seg 缺失 + SU Factor 缺失，支持导出 Excel |
 
-#### 11.0.1 Master Data Update 详细说明
+#### 11.0.1 Refresh Data 详细说明
+- 仅重新读取已处理的 CSV 文件（`load_data_bundle`），不运行 Pipeline
+- 写入 `.force_data_refresh` 标记文件；看板每 5 秒轮询一次，自动获取最新数据
+- 使用场景：手动编辑了已处理数据文件后、其他进程已更新 CSV 文件时
+
+#### 11.0.2 Master Data Update 详细说明
 - **Scan Missing Data**：扫描 Production Volume 报表中所有物料，检查两类缺失：
   - **Seg 缺失**：物料代码在 Level1 映射文件（`HairCare Code List By Seg_Update Version.xlsx`）中找不到
   - **SU Factor 缺失**：WIP 物料代码在 Parameter 文件中没有对应的 9 字头 SU 映射
@@ -243,7 +249,7 @@ CLI 用法：
 - **过滤逻辑**：仅显示至少在一个数据源中有实际数据的物料（排除无数据的僵尸物料）
 - **Export to Excel**：导出到 `data/history/master_data_reports/master_data_update_{timestamp}.xlsx`
 
-#### 11.0.2 Update & Restart 详细说明
+#### 11.0.3 Update & Restart 详细说明
 - 执行流程：`git pull origin main` → `pip install -r requirements.txt` → 写入启动标记文件 → `os.execv()` 重启进程
 - 重启后自动运行全量 Pipeline
 - **注意**：如从 VS Code 终端启动应用后使用此功能，可能因终端断开导致新进程失败。建议从 BAT 文件启动时使用此功能。

@@ -3441,6 +3441,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         children=[
             dcc.Interval(id="refresh-interval", interval=15 * 60 * 1000, n_intervals=0),
             dcc.Interval(id="pipeline-progress-interval", interval=1000, n_intervals=0, disabled=True),
+            dcc.Interval(id="force-refresh-poll", interval=5000, n_intervals=0),
             dcc.Store(id="data-store", data=data_bundle),
             dcc.Store(id="details-version-store", data={"version": details_version}),
             # --- hidden placeholders that admin callbacks target ---
@@ -3600,7 +3601,17 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
                             html.Span("", id="admin-pipeline-status", style={"fontSize": "13px", "color": "#16a34a", "marginTop": "6px", "display": "block"}),
                         ],
                     ),
-                    # ── Card 2: Backup Snapshot ──
+                    # ── Card 2: Refresh Data ──
+                    html.Div(
+                        className="admin-card",
+                        children=[
+                            html.H3("\U0001F4C4 Refresh Data"),
+                            html.P("Reload dashboard data from processed CSV files without re-running the pipeline."),
+                            html.Button("Refresh Data", id="admin-refresh-data-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
+                            html.Span("", id="admin-refresh-data-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
+                        ],
+                    ),
+                    # ── Card 3: Backup Snapshot ──
                     html.Div(
                         className="admin-card",
                         children=[
@@ -3611,7 +3622,7 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
                             html.Span("", id="admin-backup-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
                         ],
                     ),
-                    # ── Card 3: Weekly Mail Preview ──
+                    # ── Card 4: Weekly Mail Preview ──
                     html.Div(
                         className="admin-card",
                         children=[
@@ -3625,7 +3636,7 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
                             ),
                         ],
                     ),
-                    # ── Card 4: Update & Restart ──
+                    # ── Card 5: Update & Restart ──
                     html.Div(
                         className="admin-card",
                         children=[
@@ -3635,7 +3646,7 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
                             html.Span("", id="admin-update-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block", "whiteSpace": "pre-wrap"}),
                         ],
                     ),
-                    # ── Card 5: Master Data Update ──
+                    # ── Card 6: Master Data Update ──
                     html.Div(
                         className="admin-card",
                         children=[
@@ -3804,6 +3815,24 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             dash.no_update,
             dash.no_update,
         )
+
+    # ── Force-refresh poll (triggered by Admin "Refresh Data") ────
+    @app.callback(
+        Output("data-store", "data", allow_duplicate=True),
+        Output("details-version-store", "data", allow_duplicate=True),
+        Input("force-refresh-poll", "n_intervals"),
+        prevent_initial_call=True,
+    )
+    def force_refresh_poll(n):
+        flag = _PROJECT_ROOT / "data" / "processed" / ".force_data_refresh"
+        if not flag.exists():
+            raise PreventUpdate
+        try:
+            flag.unlink(missing_ok=True)
+        except Exception:
+            pass
+        bundle = load_data_bundle(cfg)
+        return bundle, {"version": bundle.get("request_details_version")}
 
     @app.callback(
         Output("metric-total-msu", "children"),
@@ -4342,6 +4371,30 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
             dash.no_update, False,
             {"marginTop": "10px", "display": "block"}, True,
         )
+
+    # ── Refresh Data (no pipeline) ────────────────────────────────
+    @app.callback(
+        Output("admin-refresh-data-status", "children"),
+        Output("admin-refresh-data-btn", "disabled"),
+        Input("admin-refresh-data-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def admin_refresh_data(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            bundle = load_data_bundle(cfg)
+            # Write flag so dashboard polls pick it up within seconds
+            flag = _PROJECT_ROOT / "data" / "processed" / ".force_data_refresh"
+            flag.parent.mkdir(parents=True, exist_ok=True)
+            flag.write_text(datetime.now().isoformat(), encoding="utf-8")
+            n_details = len(bundle.get("pde_alerts", []))
+            n_items = len(pd.DataFrame(bundle.get("monthly_item", []))["Item Text"].unique()) if bundle.get("monthly_item") else 0
+            ts = datetime.now().strftime("%H:%M:%S")
+            return f"\u2713 Data refreshed at {ts} \u2014 {n_items} items, {n_details} PDE alerts. Dashboard will update within seconds.", False
+        except Exception:
+            logging.exception("Failed to refresh data")
+            return "\u2717 Refresh failed, check server logs.", False
 
     # ── Backup Snapshot ───────────────────────────────────────────
     @app.callback(

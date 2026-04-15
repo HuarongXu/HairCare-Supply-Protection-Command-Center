@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" xmlns:mso="urn:schemas-microsoft-com:office:office" xmlns:msdt="uuid:C2F41010-65B3-11d1-A29F-00AA00C14882">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -636,6 +636,15 @@
             .reveal.visible { animation: none; }
         }
     </style>
+
+<!--[if gte mso 9]><xml>
+<mso:CustomDocumentProperties>
+<mso:MediaServiceImageTags msdt:dt="string"></mso:MediaServiceImageTags>
+<mso:TaxCatchAll msdt:dt="string">7;#Daily Work Documents [Standard]|c1df7c93-bf29-4bb4-a9f3-5b7aacc5e62b</mso:TaxCatchAll>
+<mso:lcf76f155ced4ddcb4097134ff3c332f msdt:dt="string"></mso:lcf76f155ced4ddcb4097134ff3c332f>
+<mso:RevIMBCS msdt:dt="string">7;#Daily Work Documents [Standard]|c1df7c93-bf29-4bb4-a9f3-5b7aacc5e62b</mso:RevIMBCS>
+</mso:CustomDocumentProperties>
+</xml><![endif]-->
 </head>
 <body>
 
@@ -671,6 +680,7 @@
         <span class="nav-group-title">后台管理</span>
         <a href="#admin-login">Admin 登录</a>
         <a href="#admin-pipeline">运行 Pipeline</a>
+        <a href="#admin-refresh">刷新数据</a>
         <a href="#admin-backup">备份快照</a>
         <a href="#admin-mail">周报邮件</a>
         <a href="#admin-update">远程更新</a>
@@ -941,7 +951,7 @@
             <ol class="step-list">
                 <li><strong>打开 Admin 页面</strong> — 在 Dashboard 右上角点击齿轮图标 ⚙️，或直接访问 <code>/admin</code></li>
                 <li><strong>输入密码</strong> — 默认密码：<code>HR</code>（可在 config/config.json 的 admin_password 字段修改）</li>
-                <li><strong>进入管理面板</strong> — 登录后可看到 5 张功能卡片</li>
+                <li><strong>进入管理面板</strong> — 登录后可看到 6 张功能卡片</li>
             </ol>
 
             <div class="callout callout-warn">
@@ -977,11 +987,38 @@
         </div>
 
         <!-- ================================================================ -->
+        <!-- SECTION: 刷新数据 -->
+        <!-- ================================================================ -->
+        <div class="section reveal" id="admin-refresh">
+            <h2>📄 Admin — 刷新数据</h2>
+            <p>Card 2: Refresh Data — 仅从已处理的 CSV 文件重新加载看板数据，不运行 Pipeline。</p>
+
+            <h3>操作步骤</h3>
+            <ol class="step-list">
+                <li><strong>点击 Refresh Data</strong> — 系统重新读取所有已处理的 CSV 数据文件</li>
+                <li><strong>看板自动更新</strong> — 看板页面每 5 秒轮询一次，检测到刷新信号后自动加载最新数据</li>
+            </ol>
+
+            <h3>适用场景</h3>
+            <table class="doc-table">
+                <tr><th>场景</th><th>说明</th></tr>
+                <tr><td>手动修改了 CSV 文件</td><td>编辑 <code>data/processed/</code> 下的数据文件后，无需重跑 Pipeline</td></tr>
+                <tr><td>其他进程已更新数据</td><td>外部脚本或批处理已生成新的 CSV 文件</td></tr>
+                <tr><td>看板数据不是最新</td><td>快速刷新，响应速度比 Run Pipeline 快得多</td></tr>
+            </table>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">💡</span>
+                <div><strong>与 Run Pipeline 的区别</strong>：Refresh Data 只重新读取磁盘上的 CSV 文件，不会重新从源数据（Excel 文件）解析和生成 CSV。如果源数据有更新，请使用 Run Pipeline。</div>
+            </div>
+        </div>
+
+        <!-- ================================================================ -->
         <!-- SECTION: 备份快照 -->
         <!-- ================================================================ -->
         <div class="section reveal" id="admin-backup">
             <h2>💾 Admin — 备份快照</h2>
-            <p>Card 2: Backup Snapshot — 导出当前看板所有数据到 Excel。</p>
+            <p>Card 3: Backup Snapshot — 导出当前看板所有数据到 Excel。</p>
 
             <h3>操作</h3>
             <p>点击 <strong>Create Backup</strong> → 自动生成并下载 Excel 文件。同时在服务器端保存到 <code>data/history/dashboard_snapshots/snapshot_{时间戳}/</code>。</p>
@@ -995,7 +1032,7 @@
         <!-- ================================================================ -->
         <div class="section reveal" id="admin-mail">
             <h2>✉️ Admin — 周报邮件</h2>
-            <p>Card 3: Weekly Mail Preview — 生成并预览周报 HTML 邮件。</p>
+            <p>Card 4: Weekly Mail Preview — 生成并预览周报 HTML 邮件。</p>
             <p>点击 <strong>Refresh Mail & Open</strong> → 在新标签页打开最新生成的 HTML 邮件预览。可以直接复制邮件内容用于发送。</p>
         </div>
 
@@ -1004,7 +1041,7 @@
         <!-- ================================================================ -->
         <div class="section reveal" id="admin-update">
             <h2>🚀 Admin — 远程更新</h2>
-            <p>Card 4: Update & Restart — 从 GitHub 拉取最新代码并重启应用。</p>
+            <p>Card 5: Update & Restart — 从 GitHub 拉取最新代码并重启应用。</p>
 
             <h3>执行流程</h3>
             <div class="flow">
@@ -1035,7 +1072,7 @@
         <!-- ================================================================ -->
         <div class="section reveal" id="admin-masterdata">
             <h2>🔍 Admin — 主数据扫描</h2>
-            <p>Card 5: Master Data Update — 扫描 Production Volume 数据，找出缺失映射的物料。</p>
+            <p>Card 6: Master Data Update — 扫描 Production Volume 数据，找出缺失映射的物料。</p>
 
             <h3>两种缺失类型</h3>
             <table class="doc-table">

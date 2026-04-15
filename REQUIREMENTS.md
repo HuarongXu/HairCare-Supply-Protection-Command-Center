@@ -230,17 +230,23 @@ CLI usage:
 ### 11.0 Admin Panel (`/admin`)
 Password-protected admin panel (password in `config/config.json` field `admin_password`, default: `HR`).
 
-5 management cards:
+6 management cards:
 
 | Card | Function | Description |
 |------|----------|-------------|
 | 1. Run Pipeline & Refresh | Select scope + run pipeline | Live progress bar with stage name and percentage |
-| 2. Backup Snapshot | Export dashboard snapshot | Excel + CSV saved to `data/history/dashboard_snapshots/` |
-| 3. Weekly Mail Preview | Regenerate weekly mail | Opens HTML preview in new tab |
-| 4. Update & Restart | Remote code update + restart | git pull → pip install → auto-restart → auto-run pipeline |
-| 5. Master Data Update | Scan missing master data | Scans Seg mapping + SU Factor gaps, supports Excel export |
+| 2. Refresh Data | Reload CSV data without pipeline | Dashboard updates within seconds via polling |
+| 3. Backup Snapshot | Export dashboard snapshot | Excel + CSV saved to `data/history/dashboard_snapshots/` |
+| 4. Weekly Mail Preview | Regenerate weekly mail | Opens HTML preview in new tab |
+| 5. Update & Restart | Remote code update + restart | git pull → pip install → auto-restart → auto-run pipeline |
+| 6. Master Data Update | Scan missing master data | Scans Seg mapping + SU Factor gaps, supports Excel export |
 
-#### 11.0.1 Master Data Update Details
+#### 11.0.1 Refresh Data Details
+- Reloads all processed CSV files (`load_data_bundle`) without running the pipeline
+- Writes a `.force_data_refresh` flag file; the dashboard polls every 5 seconds and picks up the new data automatically
+- Use case: after manually editing processed data files, or when another process has updated CSVs externally
+
+#### 11.0.2 Master Data Update Details
 - **Scan Missing Data**: Scans all materials in Production Volume reports for two types of missing data:
   - **Seg 缺失 (Missing Segment)**: Material code not found in Level1 mapping file (`HairCare Code List By Seg_Update Version.xlsx`)
   - **SU Factor**: WIP material code has no matching 9-prefix SU mapping in Parameter file
@@ -251,7 +257,7 @@ Password-protected admin panel (password in `config/config.json` field `admin_pa
 - **Filtering**: Only materials with data in at least one source are shown (excludes zero-volume inactive materials)
 - **Export to Excel**: Saves to `data/history/master_data_reports/master_data_update_{timestamp}.xlsx`
 
-#### 11.0.2 Update & Restart Details
+#### 11.0.3 Update & Restart Details
 - Workflow: `git pull origin main` → `pip install -r requirements.txt` → write startup flag → `os.execv()` process restart
 - After restart, full pipeline runs automatically
 - **Note**: If the app was started from VS Code terminal, this feature may fail due to terminal disconnect. Recommended to use when app is launched from BAT file.
