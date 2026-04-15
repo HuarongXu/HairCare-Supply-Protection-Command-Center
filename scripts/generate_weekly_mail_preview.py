@@ -145,20 +145,18 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
         result['supply_protection'] = supply_path
         print(f'screenshot: {supply_path.name}')
 
-        # 3. PDE Alert screenshot — show only PDE panel, hide everything else
+        # 3. PDE Alert screenshot — element-level capture of .pde-panel only
         driver.execute_script("""
-            // Show PDE panel back
             var panels = document.querySelectorAll('.pde-panel');
             panels.forEach(function(p){ p.style.display = ''; });
-            // Hide non-PDE sections (summary panels)
-            var summaries = document.querySelectorAll('.summary-panel');
-            summaries.forEach(function(s){ s.style.display = 'none'; });
         """)
         time.sleep(1)
-        pde_path = out_dir / 'pde_alert.png'
-        driver.save_screenshot(str(pde_path))
-        result['pde_alert'] = pde_path
-        print(f'screenshot: {pde_path.name}')
+        pde_el = driver.find_elements(By.CSS_SELECTOR, '.pde-panel')
+        if pde_el:
+            pde_path = out_dir / 'pde_alert.png'
+            pde_el[0].screenshot(str(pde_path))
+            result['pde_alert'] = pde_path
+            print(f'screenshot: {pde_path.name}')
 
     except Exception as e:
         print(f'screenshot capture failed: {e}')
@@ -383,7 +381,16 @@ html = f"""<!doctype html>
   <![endif]-->
 </head>
 <body style="margin:0;padding:0;font-family:Calibri,'Century Gothic','Segoe UI',Arial,sans-serif;color:#1f2937;line-height:1.6;background:#ffffff;">
-  <div style="max-width:860px;margin:0 auto;padding:20px 24px;">
+  <!-- Copy button (hidden when printing / pasting) -->
+  <div style="text-align:right;padding:10px 24px 0 0;">
+    <button onclick="copyEmail()" id="copyBtn"
+      style="padding:8px 20px;font-size:13px;font-weight:600;cursor:pointer;
+             background:#1d4ed8;color:#fff;border:none;border-radius:6px;">
+      &#128203; Copy to Clipboard
+    </button>
+    <span id="copyMsg" style="margin-left:8px;font-size:12px;color:#16a34a;display:none;">Copied!</span>
+  </div>
+  <div id="emailContent" style="max-width:860px;margin:0 auto;padding:20px 24px;">
 
     <!-- Greeting -->
     <p style="font-size:14px;margin:0 0 14px 0;">Dear all</p>
@@ -441,6 +448,25 @@ html = f"""<!doctype html>
     </p>
 
   </div>
+  <script>
+  function copyEmail() {{
+    var content = document.getElementById('emailContent');
+    var range = document.createRange();
+    range.selectNodeContents(content);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    try {{
+      document.execCommand('copy');
+      var msg = document.getElementById('copyMsg');
+      msg.style.display = 'inline';
+      setTimeout(function(){{ msg.style.display = 'none'; }}, 2000);
+    }} catch(e) {{
+      alert('Copy failed: ' + e);
+    }}
+    sel.removeAllRanges();
+  }}
+  </script>
 </body>
 </html>
 """
