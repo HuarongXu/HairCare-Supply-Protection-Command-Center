@@ -127,6 +127,14 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
                 t.click()
                 break
         time.sleep(5)
+
+        # Hide PDE panel (Past Due Alerts + FG Rolling tables) before screenshot
+        driver.execute_script("""
+            var panels = document.querySelectorAll('.pde-panel');
+            panels.forEach(function(p){ p.style.display = 'none'; });
+        """)
+        time.sleep(0.5)
+
         supply_path = out_dir / 'supply_protection.png'
         driver.save_screenshot(str(supply_path))
         result['supply_protection'] = supply_path
