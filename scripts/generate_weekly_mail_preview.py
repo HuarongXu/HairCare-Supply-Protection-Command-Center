@@ -2,16 +2,18 @@
 
 The generated HTML matches the structure of the real weekly update emails:
   - Dear all greeting
-  - Demand bullet points (monthly + quarterly)
-  - Supply Protection bullet point
+  - Demand System LBE bullet with monthly + quarterly LBE data
+  - Supply Protection bullet with monthly + quarterly HS data + inventory totals
   - Dashboard link
-  - Section placeholders for Demand Assumption / Supply Protection screenshots
-  - PDE Alert with @-mentions of requester emails
+  - Auto-captured screenshots of Demand Assumption and Supply Protection pages
+  - PDE Alert section (no names, just a placeholder)
 """
 from pathlib import Path
 from datetime import datetime
 import re
 import sys
+import time
+import base64
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +34,7 @@ from dashboards.matres_app import (
 # Dashboard URL (used in the email body link)
 # ---------------------------------------------------------------------------
 DASHBOARD_URL = "http://143.35.13.175:8050/"
+LOCAL_DASHBOARD_URL = "http://127.0.0.1:8050/"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -78,29 +81,76 @@ def get_total_iya_value(rows, period_key):
     return 0.0
 
 
-def get_pde_alert_emails(bundle):
-    """Return a sorted list of unique requester emails from PDE alerts."""
-    pde = pd.DataFrame(bundle.get('pde_alerts', []))
-    if pde.empty or 'Requester Email' not in pde.columns:
-        return []
-    emails = set()
-    for e in pde['Requester Email'].dropna():
-        for part in str(e).split(';'):
-            p = part.strip()
-            if p:
-                emails.add(p)
-    return sorted(emails)
+# ---------------------------------------------------------------------------
+# Screenshot capture
+# ---------------------------------------------------------------------------
+
+def capture_dashboard_screenshots(out_dir: Path) -> dict:
+    """Capture dashboard tab screenshots using headless Chrome.
+
+    Returns a dict with keys 'demand_assumption' and 'supply_protection',
+    values are Path objects (or None on failure).
+    """
+    result = {'demand_assumption': None, 'supply_protection': None}
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+    except ImportError:
+        print('selenium not installed, skipping screenshots')
+        return result
+
+    opts = Options()
+    opts.add_argument('--headless=new')
+    opts.add_argument('--no-sandbox')
+    opts.add_argument('--disable-gpu')
+    opts.add_argument('--window-size=1920,4000')
+    opts.add_argument('--force-device-scale-factor=1')
+
+    driver = None
+    try:
+        driver = webdriver.Chrome(options=opts)
+        dashboard_url = LOCAL_DASHBOARD_URL
+
+        # 1. Demand Assumption tab (default tab)
+        driver.get(dashboard_url)
+        time.sleep(10)
+        demand_path = out_dir / 'demand_assumption.png'
+        driver.save_screenshot(str(demand_path))
+        result['demand_assumption'] = demand_path
+        print(f'screenshot: {demand_path.name}')
+
+        # 2. Supply Protection tab
+        tabs = driver.find_elements(By.CSS_SELECTOR, '.page-tab')
+        for t in tabs:
+            if 'Supply Protection' in t.text:
+                t.click()
+                break
+        time.sleep(5)
+        supply_path = out_dir / 'supply_protection.png'
+        driver.save_screenshot(str(supply_path))
+        result['supply_protection'] = supply_path
+        print(f'screenshot: {supply_path.name}')
+
+    except Exception as e:
+        print(f'screenshot capture failed: {e}')
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+    return result
 
 
-def email_display_name(email: str) -> str:
-    """Convert 'chen.g.9@pg.com' → 'Chen, G' style display name."""
-    local = email.split('@')[0] if '@' in email else email
-    parts = [p.strip() for p in local.split('.') if p.strip()]
-    if len(parts) >= 2:
-        surname = parts[0].capitalize()
-        given = parts[1].capitalize()
-        return f"{surname}, {given}"
-    return local.capitalize()
+def image_to_base64(img_path: Path) -> str:
+    """Read an image file and return a base64 data URI string."""
+    if not img_path or not img_path.exists():
+        return ''
+    data = img_path.read_bytes()
+    b64 = base64.b64encode(data).decode('ascii')
+    return f'data:image/png;base64,{b64}'
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +218,7 @@ next_q_hs = to_num(q_total.get(f'{next_quarter_tag} DSL+SSP', 0)) if next_quarte
 next_q_lbe_iya = to_num(q_total.get(f'{next_quarter_tag} LBE IYA', 0)) if next_quarter_tag else 0.0
 next_q_hs_iya = to_num(q_total.get(f'{next_quarter_tag} DSL+SSP IYA', 0)) if next_quarter_tag else 0.0
 
-# ── Supply protection (all months total) ──────────────────────────────────
+# ── Supply protection inventory (all months total) ────────────────────────
 if not monthly_item.empty:
     monthly_item['total_msu'] = pd.to_numeric(monthly_item.get('total_msu', 0), errors='coerce').fillna(0.0)
     item_sum = monthly_item.groupby('Item Text', dropna=False)['total_msu'].sum(min_count=1).to_dict()
@@ -183,55 +233,68 @@ fg = (
 material = to_num(item_sum.get('R Material', 0)) + to_num(item_sum.get('RM Material', 0))
 supply_total = fg + material
 
-# ── PDE alert emails ──────────────────────────────────────────────────────
-pde_emails = get_pde_alert_emails(bundle)
+# ===========================================================================
+# Capture dashboard screenshots
+# ===========================================================================
+out_dir = ROOT / 'data' / 'processed' / 'weekly_mail'
+out_dir.mkdir(parents=True, exist_ok=True)
+
+screenshots = capture_dashboard_screenshots(out_dir)
+
+# Build image tags (embedded base64 for self-contained HTML)
+demand_img_tag = ''
+if screenshots.get('demand_assumption') and screenshots['demand_assumption'].exists():
+    demand_b64 = image_to_base64(screenshots['demand_assumption'])
+    if demand_b64:
+        demand_img_tag = f'<img src="{demand_b64}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px;" alt="Demand Assumption" />'
+
+supply_img_tag = ''
+if screenshots.get('supply_protection') and screenshots['supply_protection'].exists():
+    supply_b64 = image_to_base64(screenshots['supply_protection'])
+    if supply_b64:
+        supply_img_tag = f'<img src="{supply_b64}" style="max-width:100%;border:1px solid #e5e7eb;border-radius:6px;" alt="Supply Protection" />'
 
 # ===========================================================================
 # Build HTML — matching real Outlook email structure
 # ===========================================================================
 run_date = datetime.now().strftime('%Y%m%d')
 
-# Build demand bullet lines (each on one line, matching real email format)
-demand_bullets = []
-# Monthly
-demand_bullets.append(
-    f"{month_text} LBE: {fmt_msu(lbe_month)} msu / IYA {fmt_iya(lbe_iya_month)}, "
-    f"HS: {fmt_msu(hs_month)} msu / IYA {fmt_iya(hs_iya_month)}."
-)
-# Current quarter
+# ── Demand System LBE sub-bullet ──────────────────────────────────────────
+# Format: "Apr System LBE: 4,388 msu / IYA 120.7%, AMJ System LBE: 13.26 Mmsu / IYA 99.4%,"
+demand_lbe_parts = [
+    f"{month_text} System LBE: {fmt_msu(lbe_month)} msu / IYA {fmt_iya(lbe_iya_month)}"
+]
 if quarter_tag:
-    demand_bullets.append(
-        f"{quarter_tag} LBE: {fmt_mmsu(q_lbe)} Mmsu / IYA {fmt_iya(q_lbe_iya)}, "
-        f"HS: {fmt_mmsu(q_hs)} Mmsu / IYA {fmt_iya(q_hs_iya)}."
+    demand_lbe_parts.append(
+        f"{quarter_tag} System LBE: {fmt_mmsu(q_lbe)} Mmsu / IYA {fmt_iya(q_lbe_iya)}"
     )
-# Next quarter
 if next_quarter_tag:
-    demand_bullets.append(
-        f"{next_quarter_tag} LBE: {fmt_mmsu(next_q_lbe)} Mmsu / IYA {fmt_iya(next_q_lbe_iya)}, "
-        f"HS: {fmt_mmsu(next_q_hs)} Mmsu / IYA {fmt_iya(next_q_hs_iya)}."
+    demand_lbe_parts.append(
+        f"{next_quarter_tag} System LBE: {fmt_mmsu(next_q_lbe)} Mmsu / IYA {fmt_iya(next_q_lbe_iya)}"
     )
+demand_lbe_line = ", ".join(demand_lbe_parts) + "."
 
-demand_bullets_html = "\n".join(
-    f'              <li style="margin:2px 0;font-size:14px;">{line}</li>'
-    for line in demand_bullets
-)
-
-# Supply protection line
-supply_line = f"Total: {fmt_msu(supply_total)} msu; FG: {fmt_msu(fg)} msu; Material: {fmt_msu(material)} msu."
-
-# PDE alert @mentions
-if pde_emails:
-    pde_mentions = "&nbsp;&nbsp;".join(
-        f'<a href="mailto:{e}" style="color:#1d4ed8;text-decoration:none;">@{email_display_name(e)}</a>'
-        for e in pde_emails
+# ── Supply Protection sub-bullet (HS / DSL+SSP values) ────────────────────
+# Format: "Apr System LBE + Supply System Protection: 5,560 msu / IYA 152.9%. AMJ ..."
+supply_hs_parts = [
+    f"{month_text} System LBE + Supply System Protection: {fmt_msu(hs_month)} msu / IYA {fmt_iya(hs_iya_month)}"
+]
+if quarter_tag:
+    supply_hs_parts.append(
+        f"{quarter_tag} System LBE + Supply System Protection: {fmt_mmsu(q_hs)} Mmsu / IYA {fmt_iya(q_hs_iya)}"
     )
-    pde_section = f"""
-    <!-- PDE Alert -->
-    <p style="font-size:14px;margin:18px 0 0 0;">
-      <b>PDE Alert:</b>&nbsp; {pde_mentions}
-    </p>"""
-else:
-    pde_section = ""
+if next_quarter_tag:
+    supply_hs_parts.append(
+        f"{next_quarter_tag} System LBE + Supply System Protection: {fmt_mmsu(next_q_hs)} Mmsu / IYA {fmt_iya(next_q_hs_iya)}"
+    )
+supply_hs_line = ". ".join(supply_hs_parts) + "."
+
+# Supply inventory line
+supply_inventory_line = f"Total: {fmt_msu(supply_total)} msu; FG: {fmt_msu(fg)} msu; Material: {fmt_msu(material)} msu."
+
+# Screenshot or placeholder text
+demand_screenshot_html = demand_img_tag if demand_img_tag else '<p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste dashboard screenshot here)</i></p>'
+supply_screenshot_html = supply_img_tag if supply_img_tag else '<p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste dashboard screenshot here)</i></p>'
 
 # ---------------------------------------------------------------------------
 # Outlook-friendly HTML template (inline styles, no CSS classes)
@@ -256,20 +319,21 @@ html = f"""<!doctype html>
 
     <p style="font-size:14px;margin:0 0 8px 0;">Here share you the supply protection key HL as below:</p>
 
-    <!-- Demand -->
+    <!-- Demand System LBE -->
     <ul style="list-style-type:disc;margin:8px 0 0 20px;padding:0;">
-      <li style="margin:4px 0;font-size:14px;"><b>Demand</b>
-        <ul style="list-style-type:disc;margin:4px 0 0 20px;padding:0;">
-{demand_bullets_html}
+      <li style="margin:4px 0;font-size:14px;"><b>Demand System LBE:</b>
+        <ul style="list-style-type:circle;margin:4px 0 0 20px;padding:0;">
+          <li style="margin:2px 0;font-size:14px;">{demand_lbe_line}</li>
         </ul>
       </li>
     </ul>
 
     <!-- Supply Protection -->
-    <ul style="list-style-type:disc;margin:8px 0 0 20px;padding:0;">
-      <li style="margin:4px 0;font-size:14px;"><b>Supply Protection</b>
-        <ul style="list-style-type:disc;margin:4px 0 0 20px;padding:0;">
-              <li style="margin:2px 0;font-size:14px;">{supply_line}</li>
+    <ul style="list-style-type:disc;margin:4px 0 0 20px;padding:0;">
+      <li style="margin:4px 0;font-size:14px;"><b>Supply Protection:</b>
+        <ul style="list-style-type:circle;margin:4px 0 0 20px;padding:0;">
+          <li style="margin:2px 0;font-size:14px;">{supply_hs_line}</li>
+          <li style="margin:2px 0;font-size:14px;">{supply_inventory_line}</li>
         </ul>
       </li>
     </ul>
@@ -285,16 +349,20 @@ html = f"""<!doctype html>
 
     <!-- Demand Assumption Section -->
     <p style="font-size:14px;font-weight:700;color:#1e3a8a;margin:18px 0 6px 0;">Demand Assumption</p>
-    <p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste dashboard screenshot here)</i></p>
+    {demand_screenshot_html}
 
     <br/>
 
     <!-- Supply Protection Section -->
     <p style="font-size:14px;font-weight:700;color:#1e3a8a;margin:18px 0 6px 0;">Supply Protection:</p>
-    <p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste dashboard screenshot here)</i></p>
+    {supply_screenshot_html}
 
     <br/>
-{pde_section}
+
+    <!-- PDE Alert -->
+    <p style="font-size:14px;margin:18px 0 0 0;">
+      <b>PDE Alert:</b>
+    </p>
 
     <!-- Footer -->
     <p style="font-size:11px;color:#9ca3af;margin:24px 0 0 0;">
@@ -309,8 +377,6 @@ html = f"""<!doctype html>
 # ===========================================================================
 # Write output
 # ===========================================================================
-out_dir = ROOT / 'data' / 'processed' / 'weekly_mail'
-out_dir.mkdir(parents=True, exist_ok=True)
 out_file = out_dir / f'Supply_Protection_Update_{run_date}.html'
 out_file.write_text(html, encoding='utf-8')
 
@@ -319,5 +385,7 @@ print(f'month={current_month}, quarter={quarter_tag}, next_quarter={next_quarter
 print(f'lbe_month={lbe_month:.3f}, lbe_iya_month={lbe_iya_month:.3f}')
 print(f'hs_month={hs_month:.3f}, hs_iya_month={hs_iya_month:.3f}')
 print(f'supply_total_all_months={supply_total:.3f}, fg={fg:.3f}, material={material:.3f}')
-if pde_emails:
-    print(f'pde_alert_emails={", ".join(pde_emails)}')
+if screenshots.get('demand_assumption'):
+    print(f'screenshot_demand={screenshots["demand_assumption"]}')
+if screenshots.get('supply_protection'):
+    print(f'screenshot_supply={screenshots["supply_protection"]}')
