@@ -144,6 +144,33 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
     return result
 
 
+def autocrop_screenshot(img_path: Path, padding: int = 8) -> None:
+    """Trim whitespace (blank rows) from the bottom / right of a screenshot.
+
+    Detects the background colour from the bottom-right corner and crops
+    away uniform-background borders.
+    """
+    try:
+        from PIL import Image, ImageChops
+    except ImportError:
+        return  # Pillow not installed, skip crop
+
+    img = Image.open(img_path).convert('RGB')
+    # Use the bottom-right pixel as the "background" colour
+    bg_color = img.getpixel((img.width - 1, img.height - 1))
+    bg = Image.new('RGB', img.size, bg_color)
+    diff = ImageChops.difference(img, bg)
+    bbox = diff.getbbox()  # (left, upper, right, lower)
+    if bbox:
+        left = max(0, bbox[0] - padding)
+        upper = max(0, bbox[1] - padding)
+        right = min(img.width, bbox[2] + padding)
+        lower = min(img.height, bbox[3] + padding)
+        cropped = img.crop((left, upper, right, lower))
+        cropped.save(img_path)
+        print(f'cropped {img_path.name}: {img.size} -> {cropped.size}')
+
+
 def image_to_base64(img_path: Path) -> str:
     """Read an image file and return a base64 data URI string."""
     if not img_path or not img_path.exists():
@@ -241,6 +268,11 @@ out_dir.mkdir(parents=True, exist_ok=True)
 
 screenshots = capture_dashboard_screenshots(out_dir)
 
+# Auto-crop whitespace from screenshots
+for key in ('demand_assumption', 'supply_protection'):
+    if screenshots.get(key) and screenshots[key].exists():
+        autocrop_screenshot(screenshots[key])
+
 # Build image tags (embedded base64 for self-contained HTML)
 demand_img_tag = ''
 if screenshots.get('demand_assumption') and screenshots['demand_assumption'].exists():
@@ -333,7 +365,6 @@ html = f"""<!doctype html>
       <li style="margin:4px 0;font-size:14px;"><b>Supply Protection:</b>
         <ul style="list-style-type:circle;margin:4px 0 0 20px;padding:0;">
           <li style="margin:2px 0;font-size:14px;">{supply_hs_line}</li>
-          <li style="margin:2px 0;font-size:14px;">{supply_inventory_line}</li>
         </ul>
       </li>
     </ul>

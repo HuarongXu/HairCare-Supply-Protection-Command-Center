@@ -3385,7 +3385,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 className="summary-panel",
                 children=[
                     html.H3("Production Data"),
-                    html.P("说明：当前数据不可读，验证中。"),
                     html.H4("Production Data (By Plant) - Table 1"),
                     DataTable(
                         id="production-data-plant-table-1",
