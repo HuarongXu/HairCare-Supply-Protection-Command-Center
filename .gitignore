@@ -29,3 +29,10 @@ dashboards/matres_app copy.py
 !dashboards/matres_app V38*.py
 !dashboards/matres_app V39*.py
 !dashboards/matres_app V40*.py
+
+# Local-only artefacts
+diff_output.txt
+*.exe
+*.zip
+scripts/matres_pipeline V*.py
+Historical Data/

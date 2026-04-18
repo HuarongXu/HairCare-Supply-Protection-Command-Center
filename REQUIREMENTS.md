@@ -128,6 +128,7 @@ Install already included in requirements.
 - `td_version_gap_details.csv`
 - `production_data_summary.csv`
 - `production_data_summary_by_level.csv`
+- `td_demand_by_dimension.csv`
 - `pipeline_progress.json` (pipeline execution progress file)
 
 ### 10.2.1 Staged Pipeline Execution
@@ -138,7 +139,7 @@ The pipeline supports independent stage execution. Four stages can run separatel
 | `supply` | Supply Protection (MR) | MR Workbook | monthly_item, monthly_requester, monthly_level1, pde_alerts, request_details, level1_unmapped |
 | `demand` | Demand (HC IDP) | HC IDP Reports | hc_idp_monthly |
 | `td` | TD Validation | HC IDP Reports | td_validation, td_validation_gap_detail |
-| `production` | Production Data | Production Volume files | production_data, production_data_by_level |
+| `production` | Production Data | Production Volume files + TD Report | production_data, production_data_by_level, td_demand_by_dimension |
 
 CLI usage:
 ```powershell
@@ -188,6 +189,17 @@ CLI usage:
 	- `MRP Elements` only in `2.1Planned Orders` and `2.2Process Orders`
 - `Other` is excluded by design, because `Other` includes QM quantities already counted in MTD; keeping `Other` would double count.
 - Production Data month columns are **dynamic**: display all detected `YYYY-MM` months available in Production Vol source files (not fixed to 6 months).
+
+### 10.13 Production Dimension Detail Logic
+- Data source: same Production Vol files as Summary tables, kept at material level (not grouped by Plant/Level).
+- Dimension labels (Brand, Lineup, Size, Type, NI/Conversion, Prod Line, Variant) are joined from the TD Report (`Monthly` sheet) via `material_key` (normalized APO Product).
+- MTD current-month actuals are merged from HP MTD / XQTC MTD reports.
+- Output: `td_demand_by_dimension.csv` with columns `[Plant, Brand, Lineup, Size, Type, NI/Conversion, Prod Line, Variant, MTD, Left Production, Current Month Total, <future month columns>]`.
+- Current month column is **excluded** from the detail display since it is already represented by MTD + Left Production + Current Month Total.
+- UI supports:
+  - **Group By** dropdown: any combination of Plant + 7 dimension columns (default: Plant / Brand / Size / Variant).
+  - **6 filter dropdowns** (Brand, Size, Variant, Plant, Lineup, Prod Line): multi-select with Select All.
+  - DataTable with Total row at bottom.
 
 ### 10.6 Demand HS Logic
 - `Demand HS = Demand LBE + Supply Protection` by month.
@@ -285,10 +297,17 @@ Password-protected admin panel (password in `config/config.json` field `admin_pa
 	- TD version monthly comparison.
 	- Click GAP row to drill into `Level2 GAP Details` and `GAP Difference Details`.
 	- Supports export for both detail tables.
-- `Production Data`
-	- `By Plant` and `By Plant / Level1 / Level2` tables.
-	- Current month split into `MTD`, `Left Production`, `Current Month`.
-	- Total rows are highlighted (including `GC Total`).
+- `Production Data` — organized in two sub-tabs:
+	- **Summary** sub-tab:
+		- `By Plant` and `By Plant / Level1 / Level2` tables.
+		- Current month split into `MTD`, `Left Production`, `Current Month`.
+		- Total rows are highlighted (including `GC Total`).
+	- **Detail by Brand/Size/Variant** sub-tab:
+		- Production data cross-referenced with TD Report dimension labels.
+		- `Group By` dropdown to choose aggregation dimensions (default: Plant / Brand / Size / Variant).
+		- 6 filter dropdowns (Brand, Size, Variant, Plant, Lineup, Prod Line) with multi-select.
+		- Displays MTD, Left Production, Current Month Total, and future month columns (current month excluded).
+		- Total row appended at bottom.
 
 ## 12) Board Logic HTML Guide
 - A handover-ready HTML documentation is provided at:

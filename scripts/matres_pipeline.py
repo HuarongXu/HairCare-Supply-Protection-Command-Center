@@ -39,6 +39,7 @@ PROCESSED_FILES = {
     "td_validation_gap_detail": "td_version_gap_details.csv",
     "production_data": "production_data_summary.csv",
     "production_data_by_level": "production_data_summary_by_level.csv",
+    "td_demand_by_dimension": "td_demand_by_dimension.csv",
 }
 PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS = {"2.1plannedorders", "2.2processorders"}
 PRODUCTION_VOL_OTHER_EXCLUSION_REASON = (
@@ -1322,6 +1323,400 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     result = result[result[total_check_cols].abs().sum(axis=1) > 0].copy()
     result = result.sort_values(["Plant", "Level1", "Level2"], ascending=[True, True, True]).reset_index(drop=True)
     return result
+
+
+# ---------------------------------------------------------------------------
+# TD Demand by dimension (Brand / Lineup / Size / Type / Variant)
+# ---------------------------------------------------------------------------
+
+_TD_DIMENSION_COLS = ["Brand", "Lineup", "Size", "Type", "NI/Conversion", "Prod Line", "Variant"]
+
+
+def _read_td_dimension_mapping(root: Path) -> pd.DataFrame:
+    """Read the latest TD report and return a mapping: material_key → Brand/Lineup/Size/Type/…
+
+    Returns a DataFrame with columns: material_key, Brand, Lineup, Size, Type,
+    NI/Conversion, Prod Line, Variant.  Duplicates on material_key are dropped
+    (keep first).
+    """
+    dim_cols = list(_TD_DIMENSION_COLS)
+    report_path = find_latest_hc_idp_report(root)
+    if report_path is None:
+        logging.warning("No HC IDP HANA TD Report found under %s for dimension mapping", root)
+        return pd.DataFrame(columns=["material_key"] + dim_cols)
+
+    try:
+        preview = pd.read_excel(report_path, sheet_name="Monthly", header=None)
+    except Exception:
+        logging.exception("Failed to read Monthly sheet from %s for dimension mapping", report_path)
+        return pd.DataFrame(columns=["material_key"] + dim_cols)
+
+    header_row = None
+    for row_idx in range(min(300, len(preview))):
+        row_values = [str(v).strip().lower() for v in preview.iloc[row_idx].tolist()]
+        if "overall result" in row_values:
+            header_row = row_idx
+            break
+
+    if header_row is None:
+        return pd.DataFrame(columns=["material_key"] + dim_cols)
+
+    try:
+        raw = pd.read_excel(report_path, sheet_name="Monthly", header=header_row)
+    except Exception:
+        return pd.DataFrame(columns=["material_key"] + dim_cols)
+
+    if raw.empty:
+        return pd.DataFrame(columns=["material_key"] + dim_cols)
+
+    columns = list(raw.columns)
+    normalized_map = {str(col).strip().lower(): col for col in columns}
+
+    # APO Product column (col index 7)
+    apo_col = normalized_map.get("apo product")
+    if apo_col is None and len(columns) > 7:
+        apo_col = columns[7]
+    if apo_col is None:
+        return pd.DataFrame(columns=["material_key"] + dim_cols)
+
+    # Locate dimension columns (after "Overall Result")
+    dim_col_map: Dict[str, str] = {}
+    for dim_name in dim_cols:
+        key = dim_name.lower()
+        if key in normalized_map:
+            dim_col_map[dim_name] = normalized_map[key]
+        else:
+            for col in columns:
+                col_clean = str(col).strip().lower()
+                if col_clean.startswith(key) or col_clean == key:
+                    if dim_name not in dim_col_map:
+                        dim_col_map[dim_name] = col
+
+    if "Brand" not in dim_col_map:
+        for col in columns:
+            col_str = str(col).strip().lower()
+            if col_str.startswith("brand") and col_str != "brand":
+                dim_col_map["Brand"] = col
+                break
+
+    if not dim_col_map:
+        return pd.DataFrame(columns=["material_key"] + dim_cols)
+
+    selected = [apo_col] + list(dim_col_map.values())
+    working = raw[selected].copy()
+    rename = {v: k for k, v in dim_col_map.items()}
+    rename[apo_col] = "_apo_product"
+    working = working.rename(columns=rename)
+
+    working["material_key"] = working["_apo_product"].apply(normalize_material_key)
+    working = working[working["material_key"].astype(bool)].copy()
+
+    for dim in dim_cols:
+        if dim in working.columns:
+            working[dim] = working[dim].fillna("").astype(str).str.strip()
+        else:
+            working[dim] = ""
+
+    # Keep first occurrence per material_key (unique mapping)
+    working = working.drop_duplicates(subset=["material_key"], keep="first")
+    return working[["material_key"] + dim_cols].reset_index(drop=True)
+
+
+def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFrame:
+    """Build production data (same source as summary-by-level) but grouped by
+    TD dimension columns (Brand / Lineup / Size / Type / Variant) instead of Level1/Level2.
+
+    The production volumes come from Production Volume reports; dimension labels
+    are looked up from the TD report via APO Product ↔ Material key.
+    """
+    dim_cols = list(_TD_DIMENSION_COLS)
+    base_cols = ["Plant"] + dim_cols + ["MTD", "Left Production", "Current Month Total"]
+
+    # ─── 1. Read dimension mapping from TD report ───
+    td_mapping = _read_td_dimension_mapping(root)
+    if td_mapping.empty:
+        logging.warning("Empty TD dimension mapping – Detail table will be empty")
+        return pd.DataFrame(columns=base_cols)
+
+    # ─── 2. Reuse the same production data pipeline as summary-by-level ───
+    production_root = cfg.production_data_dir
+
+    def parse_numeric(series: pd.Series) -> pd.Series:
+        cleaned = (
+            series.fillna("")
+            .astype(str)
+            .str.replace("\u00a0", "", regex=False)
+            .str.replace(",", "", regex=False)
+            .str.replace(" ", "", regex=False)
+            .str.strip()
+        )
+        return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
+
+    def sort_month_values(values: Iterable[str]) -> list[str]:
+        def key_func(value: str):
+            parsed = pd.Period(str(value), freq="M")
+            return parsed.start_time
+        return sorted({str(v) for v in values if str(v).strip()}, key=key_func)
+
+    def normalize_month_label(raw_label: str) -> Optional[str]:
+        text = str(raw_label).strip()
+        dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
+        if dot_match:
+            month, year = dot_match.groups()
+            return f"{year}-{month}"
+        dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
+        if dash_match:
+            return text
+        return None
+
+    def pick_column(df: pd.DataFrame, candidates: list[str], contains: list[str] | None = None) -> Optional[str]:
+        normalized_map = {str(col).strip().lower(): col for col in df.columns}
+        for name in candidates:
+            if name in normalized_map:
+                return normalized_map[name]
+        if contains:
+            for col in df.columns:
+                key = str(col).strip().lower()
+                if all(token in key for token in contains):
+                    return col
+        return None
+
+    all_reports = [
+        p for p in production_root.glob("*.xls*")
+        if p.is_file() and not p.name.startswith("~$")
+    ]
+    mtd_reports = sorted([
+        p for p in all_reports
+        if "mtd" in p.name.lower() and "production vol" not in p.name.lower()
+    ])
+    production_vol_reports = sorted([
+        p for p in all_reports
+        if "production vol" in p.name.lower()
+    ])
+
+    if not production_vol_reports:
+        return pd.DataFrame(columns=base_cols)
+
+    xqtc_9su_mapping = read_xqtc_9su_mapping(production_root)
+
+    # ─── 2a. MTD data (material-level) ───
+    mtd_frames: list[pd.DataFrame] = []
+    for report_path in mtd_reports:
+        try:
+            raw = read_production_schedule_report(report_path)
+        except Exception:
+            continue
+        if raw.empty:
+            continue
+        raw = standardize_column_names(raw)
+        start_date_col = pick_column(raw, ["startdate", "start date"], ["start", "date"])
+        plant_col = pick_column(raw, ["plant"], ["plant"])
+        material_col = pick_column(raw, ["material", "material number"], ["material"])
+        deliv_col = pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
+        if any(c is None for c in [start_date_col, plant_col, material_col, deliv_col]):
+            continue
+        working = raw[[start_date_col, plant_col, material_col, deliv_col]].copy()
+        working.columns = ["StartDate", "Plant", "Material", "Deliv. Quantity"]
+        working["StartDateParsed"] = pd.to_datetime(working["StartDate"], errors="coerce")
+        working = working[working["StartDateParsed"].notna()].copy()
+        if working.empty:
+            continue
+        working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        working["Material"] = working["Material"].fillna("").astype(str).str.strip()
+        working = working[(working["Plant"] != "") & (working["Material"] != "")].copy()
+        if working.empty:
+            continue
+        working["MTD_VALUE"] = parse_numeric(working["Deliv. Quantity"]) / 1000.0
+        working["Month"] = working["StartDateParsed"].dt.to_period("M").astype(str)
+        working["material_key"] = working["Material"].apply(normalize_material_key)
+        working = working[working["material_key"].astype(bool)].copy()
+        if working.empty:
+            continue
+        monthly = (
+            working.groupby(["Plant", "material_key", "Month"], dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+        mtd_frames.append(monthly)
+
+    if mtd_frames:
+        mtd_monthly = (
+            pd.concat(mtd_frames, ignore_index=True)
+            .groupby(["Plant", "material_key", "Month"], dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+    else:
+        mtd_monthly = pd.DataFrame(columns=["Plant", "material_key", "Month", "MTD_VALUE"])
+
+    # ─── 2b. Production volume data (material-level) ───
+    detail_frames: list[pd.DataFrame] = []
+    month_labels: set[str] = set()
+    for report_path in production_vol_reports:
+        try:
+            raw = read_production_volume_report(report_path)
+        except Exception:
+            continue
+        if raw.empty:
+            continue
+        category_col = pick_column(raw, ["categories / members"], ["categories"])
+        plant_col = pick_column(raw, ["plant"], ["plant"])
+        material_col = pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
+        prev_perd_col = pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
+        d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
+        if any(c is None for c in [category_col, plant_col, material_col, mrp_elements_col, prev_perd_col]):
+            continue
+
+        month_col_map: Dict[str, str] = {}
+        passed_prev_perd = False
+        for col in raw.columns:
+            if col == prev_perd_col:
+                passed_prev_perd = True
+                continue
+            if not passed_prev_perd:
+                continue
+            normalized = normalize_month_label(str(col).strip())
+            if normalized:
+                month_col_map[col] = normalized
+
+        if not month_col_map:
+            continue
+
+        select_cols = [category_col, plant_col, material_col, mrp_elements_col, *month_col_map.keys()]
+        if d_filter_col is not None and d_filter_col not in select_cols:
+            select_cols.append(d_filter_col)
+        working = raw[select_cols].copy()
+        rename_base = {
+            category_col: "Category",
+            plant_col: "Plant",
+            material_col: "Material",
+            mrp_elements_col: "MRP Elements",
+        }
+        if d_filter_col is not None and d_filter_col in working.columns and d_filter_col != plant_col:
+            rename_base[d_filter_col] = "_D_FILTER"
+        working = working.rename(columns=rename_base)
+
+        working["Category"] = working["Category"].fillna("").astype(str).str.strip()
+        working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        working["Material"] = working["Material"].fillna("").astype(str).str.strip()
+        working["MRP Elements"] = working["MRP Elements"].fillna("").astype(str).str.strip()
+        if "_D_FILTER" in working.columns:
+            working["_D_FILTER"] = working["_D_FILTER"].fillna("").astype(str).str.strip()
+
+        working = working[
+            working["Category"].str.replace(" ", "", regex=False).str.lower().eq("2.0production/receipts")
+            & working["MRP Elements"].str.replace(" ", "", regex=False).str.lower().isin(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS)
+            & working["Plant"].ne("")
+            & working["Material"].ne("")
+            & (working["_D_FILTER"].ne("") if "_D_FILTER" in working.columns else True)
+        ].copy()
+        if working.empty:
+            continue
+
+        working["material_key"] = working["Material"].apply(normalize_material_key)
+        working = working[working["material_key"].astype(bool)].copy()
+        if working.empty:
+            continue
+
+        rename_map = {src: lbl for src, lbl in month_col_map.items()}
+        working = working.rename(columns=rename_map)
+        normalized_month_cols = sorted({lbl for lbl in rename_map.values()})
+
+        report_name_lower = report_path.name.lower()
+        is_xqtc_report = "xqtc" in report_name_lower
+        is_xqtc_wip = is_xqtc_report and "wip" in report_name_lower
+
+        if is_xqtc_report:
+            working = working.merge(xqtc_9su_mapping, on="material_key", how="left")
+            bottle_mask = working.get("is_bottle_line", False)
+            if not isinstance(bottle_mask, pd.Series):
+                bottle_mask = pd.Series(False, index=working.index)
+            working = working[bottle_mask.fillna(False)].copy()
+            if working.empty:
+                continue
+
+        for month_col in normalized_month_cols:
+            month_values = parse_numeric(working[month_col])
+            if is_xqtc_wip:
+                su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
+                working[month_col] = month_values * su9_values / 1000.0
+            elif is_xqtc_report:
+                working[month_col] = month_values / 1000.0
+            else:
+                working[month_col] = month_values
+            month_labels.add(month_col)
+
+        # Keep material-level (don't group by Level1/Level2)
+        grouped = (
+            working.groupby(["Plant", "material_key"], dropna=False)[normalized_month_cols]
+            .sum(min_count=1)
+            .reset_index()
+        )
+        detail_frames.append(grouped)
+
+    if not detail_frames:
+        return pd.DataFrame(columns=base_cols)
+
+    prod_material = (
+        pd.concat(detail_frames, ignore_index=True)
+        .groupby(["Plant", "material_key"], dropna=False)
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    sorted_months = sort_month_values(month_labels)
+    if not sorted_months:
+        return pd.DataFrame(columns=base_cols)
+    month_window = sorted_months
+    current_month = month_window[0]
+
+    for m in month_window:
+        prod_material[m] = pd.to_numeric(prod_material.get(m, 0.0), errors="coerce").fillna(0.0)
+
+    # ─── 3. Merge MTD ───
+    mtd_current = mtd_monthly[mtd_monthly["Month"].astype(str) == current_month].copy()
+    if not mtd_current.empty:
+        mtd_current = (
+            mtd_current.groupby(["Plant", "material_key"], dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+    else:
+        mtd_current = pd.DataFrame(columns=["Plant", "material_key", "MTD_VALUE"])
+
+    prod_material = prod_material.merge(mtd_current, on=["Plant", "material_key"], how="outer")
+    prod_material["Plant"] = prod_material["Plant"].fillna("").astype(str).str.strip()
+    prod_material = prod_material[prod_material["Plant"] != ""].copy()
+    prod_material["MTD_VALUE"] = pd.to_numeric(prod_material.get("MTD_VALUE", 0.0), errors="coerce").fillna(0.0)
+    for m in month_window:
+        prod_material[m] = pd.to_numeric(prod_material.get(m, 0.0), errors="coerce").fillna(0.0)
+    prod_material["Left Production"] = prod_material[current_month]
+    prod_material["MTD"] = prod_material["MTD_VALUE"]
+    prod_material["Current Month Total"] = prod_material["MTD"] + prod_material["Left Production"]
+    prod_material[current_month] = prod_material["Left Production"]
+
+    # ─── 4. Join TD dimension mapping ───
+    prod_material = prod_material.merge(td_mapping, on="material_key", how="left")
+    for dim in dim_cols:
+        prod_material[dim] = prod_material[dim].fillna("未映射").astype(str).str.strip()
+        prod_material.loc[prod_material[dim] == "", dim] = "未映射"
+
+    # ─── 5. Group by Plant + dimensions ───
+    group_keys = ["Plant"] + dim_cols
+    numeric_cols = ["MTD", "Left Production", "Current Month Total"] + month_window
+    grouped = (
+        prod_material.groupby(group_keys, dropna=False)[numeric_cols]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    # Filter out all-zero rows
+    grouped = grouped[grouped[numeric_cols].abs().sum(axis=1) > 0].copy()
+    grouped = grouped.sort_values(group_keys, ascending=True).reset_index(drop=True)
+
+    ordered_cols = group_keys + ["MTD", "Left Production", "Current Month Total"] + month_window
+    return grouped[ordered_cols]
 
 
 def normalize_hc_idp_prod_line_bucket(value: object) -> Optional[str]:
@@ -2717,12 +3112,15 @@ def _run_stage_td(cfg: PipelineConfig) -> None:
 
 
 def _run_stage_production(cfg: PipelineConfig) -> None:
-    """Build production data summaries (plant-level + by-level)."""
+    """Build production data summaries (plant-level + by-level + TD dimension breakdown)."""
     production_data = build_production_data_summary(cfg.production_data_dir, cfg)
     write_processed_csv(production_data, cfg.processed_dir, PROCESSED_FILES["production_data"])
 
     production_data_by_level = build_production_data_summary_by_level(cfg.production_data_dir, cfg)
     write_processed_csv(production_data_by_level, cfg.processed_dir, PROCESSED_FILES["production_data_by_level"])
+
+    td_demand_by_dim = build_td_demand_by_dimension(cfg.data_base_dir, cfg)
+    write_processed_csv(td_demand_by_dim, cfg.processed_dir, PROCESSED_FILES["td_demand_by_dimension"])
 
 
 _STAGE_RUNNERS = {
@@ -2862,6 +3260,9 @@ def run_pipeline(cfg: PipelineConfig) -> None:
 
     production_data_by_level = build_production_data_summary_by_level(cfg.production_data_dir, cfg)
     write_processed_csv(production_data_by_level, cfg.processed_dir, PROCESSED_FILES["production_data_by_level"])
+
+    td_demand_by_dim = build_td_demand_by_dimension(cfg.data_base_dir, cfg)
+    write_processed_csv(td_demand_by_dim, cfg.processed_dir, PROCESSED_FILES["td_demand_by_dimension"])
 
     td_validation = build_td_validation_monthly_comparison(cfg.data_base_dir)
     write_processed_csv(td_validation, cfg.processed_dir, PROCESSED_FILES["td_validation_monthly_compare"])

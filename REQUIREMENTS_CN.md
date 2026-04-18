@@ -123,6 +123,7 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 - `td_version_gap_details.csv`
 - `production_data_summary.csv`
 - `production_data_summary_by_level.csv`
+- `td_demand_by_dimension.csv`
 - `pipeline_progress.json`（Pipeline 运行进度文件）
 
 ### 10.2.1 Pipeline 分阶段执行
@@ -133,7 +134,7 @@ Pipeline 支持分阶段独立运行，4 个阶段互相独立：
 | `supply` | Supply Protection (MR) | MR 工作簿 | monthly_item, monthly_requester, monthly_level1, pde_alerts, request_details, level1_unmapped |
 | `demand` | Demand (HC IDP) | HC IDP 报表 | hc_idp_monthly |
 | `td` | TD Validation | HC IDP 报表 | td_validation, td_validation_gap_detail |
-| `production` | Production Data | Production Volume 文件 | production_data, production_data_by_level |
+| `production` | Production Data | Production Volume 文件 + TD 报表 | production_data, production_data_by_level, td_demand_by_dimension |
 
 CLI 用法：
 ```powershell
@@ -180,6 +181,17 @@ CLI 用法：
   - `MRP Elements` 仅保留 `2.1Planned Orders` 与 `2.2Process Orders`
 - 业务口径上剔除 `Other`：因 `Other` 包含 QM，而 QM 已在 MTD 中统计；若保留会造成重复计算。
 - Production Data 月份列采用**动态展示**：按 Production Vol 实际存在的 `YYYY-MM` 月份全部展示，不再固定 6 个月。
+
+### 10.13 Production 维度明细逻辑
+- 数据来源：与 Summary 表相同的 Production Vol 文件，保留到物料级别（不按 Plant/Level 聚合）。
+- 维度标签（Brand、Lineup、Size、Type、NI/Conversion、Prod Line、Variant）通过 `material_key`（标准化 APO Product）从 TD 报表 `Monthly` 页签关联。
+- MTD 当月实际数据来自 HP MTD / XQTC MTD 报表合并。
+- 产出：`td_demand_by_dimension.csv`，列包含 `[Plant, Brand, Lineup, Size, Type, NI/Conversion, Prod Line, Variant, MTD, Left Production, Current Month Total, <未来月份列>]`。
+- 当月列在明细中**不显示**，因为 MTD + Left Production + Current Month Total 已经包含当月信息。
+- UI 支持：
+  - **Group By** 下拉框：可任意组合 Plant + 7 个维度列（默认：Plant / Brand / Size / Variant）。
+  - **6 个筛选下拉框**（Brand、Size、Variant、Plant、Lineup、Prod Line）：多选 + Select All。
+  - DataTable 底部附加 Total 汇总行。
 
 ### 10.6 Demand HS 逻辑
 - `Demand HS = Demand LBE + Supply Protection`（按月）
@@ -276,10 +288,17 @@ CLI 用法：
   - `TD Version Monthly Comparison` 主表。
   - 点击 GAP 行后可查看 `Level2 GAP Details` 与 `GAP Difference Details`。
   - 两类明细都支持导出。
-- `Production Data`
-  - `By Plant` 与 `By Plant / Level1 / Level2` 两张表。
-  - 当月拆分为 `MTD`、`Left Production`、`Current Month`。
-  - Total 行（含 `GC Total`）高亮显示。
+- `Production Data` — 分为两个子标签页：
+  - **Summary** 子标签页：
+    - `By Plant` 与 `By Plant / Level1 / Level2` 两张表。
+    - 当月拆分为 `MTD`、`Left Production`、`Current Month`。
+    - Total 行（含 `GC Total`）高亮显示。
+  - **Detail by Brand/Size/Variant** 子标签页：
+    - 生产数据关联 TD 报表维度标签。
+    - `Group By` 下拉框可选聚合维度（默认：Plant / Brand / Size / Variant）。
+    - 6 个筛选下拉框（Brand、Size、Variant、Plant、Lineup、Prod Line），支持多选。
+    - 展示 MTD、Left Production、Current Month Total 及未来月份列（当月列不显示）。
+    - 底部附加 Total 汇总行。
 
 ## 12）板子逻辑 HTML 说明文档
 - 已提供可交接的 HTML 文档：

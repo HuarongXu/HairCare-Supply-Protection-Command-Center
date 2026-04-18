@@ -204,7 +204,7 @@ _REFRESH_GROUP_KEYS: Dict[str, List[str]] = {
         "pde_alerts",
     ],
     "td": ["td_validation", "td_validation_detail"],
-    "production": ["production_data", "production_data_by_level"],
+    "production": ["production_data", "production_data_by_level", "td_demand_by_dimension"],
 }
 
 
@@ -217,6 +217,7 @@ def _load_single_key(cfg: AppConfig, key: str) -> Any:
         "hc_idp_monthly": lambda: load_dataset(cfg.processed_dir, "hc_idp_monthly_summary.csv"),
         "production_data": lambda: load_dataset(cfg.processed_dir, "production_data_summary.csv"),
         "production_data_by_level": lambda: load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv"),
+        "td_demand_by_dimension": lambda: load_dataset(cfg.processed_dir, "td_demand_by_dimension.csv"),
         "td_validation": lambda: load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv"),
         "td_validation_detail": lambda: load_dataset(cfg.processed_dir, "td_version_gap_details.csv"),
         "historical_shipment": lambda: load_historical_shipment_dataset(cfg),
@@ -1463,6 +1464,102 @@ def build_production_data_table_by_plant_level(
     return columns, result_df[ordered_cols].to_dict("records")
 
 
+# ---------------------------------------------------------------------------
+# Production Detail by Dimension (Brand / Size / Variant etc.)
+# ---------------------------------------------------------------------------
+
+_PROD_DIM_COLS = ["Plant", "Brand", "Lineup", "Size", "Type", "NI/Conversion", "Prod Line", "Variant"]
+
+
+def build_production_dimension_options(df: pd.DataFrame) -> Dict[str, List[Dict[str, str]]]:
+    """Return dropdown options for each dimension column present in the data."""
+    options: Dict[str, List[Dict[str, str]]] = {}
+    for dim in _PROD_DIM_COLS:
+        if dim not in df.columns:
+            options[dim] = []
+            continue
+        unique_values = sorted(df[dim].fillna("").astype(str).str.strip().unique())
+        unique_values = [v for v in unique_values if v]
+        options[dim] = [{"label": v, "value": v} for v in unique_values]
+    return options
+
+
+def build_production_dimension_table(
+    df: pd.DataFrame,
+    group_by: List[str],
+    filters: Optional[Dict[str, List[str]]] = None,
+) -> Tuple[List[Dict], List[Dict]]:
+    """Build a production data table grouped by the selected dimensions.
+
+    The source data has the same structure as the production summary tables:
+    Plant + dimension columns + MTD / Left Production / Current Month Total + month columns.
+    """
+    if df.empty or not group_by:
+        columns = [{"name": dim, "id": dim} for dim in (group_by or ["Brand"])]
+        return columns, []
+
+    working = df.copy()
+
+    # Clean dimension columns
+    for dim in _PROD_DIM_COLS:
+        if dim in working.columns:
+            working[dim] = working[dim].fillna("").astype(str).str.strip()
+
+    # Apply filters
+    if filters:
+        for dim, selected_values in filters.items():
+            if selected_values and dim in working.columns:
+                working = working[working[dim].isin(selected_values)].copy()
+
+    if working.empty:
+        columns = [{"name": dim, "id": dim} for dim in group_by]
+        return columns, []
+
+    # Identify numeric columns: MTD, Left Production, Current Month Total + month cols
+    month_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
+    # Exclude current month (first month) – it is already covered by
+    # "Current Month Total" (= MTD + Left Production).
+    if month_cols:
+        month_cols = month_cols[1:]
+    fixed_numeric = ["MTD", "Left Production", "Current Month Total"]
+    numeric_cols = [c for c in fixed_numeric if c in working.columns] + month_cols
+
+    for col in numeric_cols:
+        working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+
+    # Group by selected dimensions
+    valid_group_by = [g for g in group_by if g in working.columns]
+    if not valid_group_by:
+        valid_group_by = [group_by[0]] if group_by else ["Brand"]
+        for g in valid_group_by:
+            if g not in working.columns:
+                working[g] = ""
+
+    grouped = (
+        working.groupby(valid_group_by, dropna=False)[numeric_cols]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    # Remove rows where all numeric values are 0
+    grouped = grouped[grouped[numeric_cols].abs().sum(axis=1) > 0].copy()
+
+    # Add a Total row
+    if not grouped.empty:
+        total_row = {dim: "Total" if dim == valid_group_by[0] else "" for dim in valid_group_by}
+        for col in numeric_cols:
+            total_row[col] = grouped[col].sum()
+        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
+
+    # Format numeric columns
+    for col in numeric_cols:
+        grouped[col] = grouped[col].apply(lambda v: "-" if pd.isna(v) or float(v) == 0.0 else f"{float(v):,.0f}")
+
+    ordered_cols = valid_group_by + numeric_cols
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, grouped[ordered_cols].to_dict("records")
+
+
 def build_demand_hs_dataframe(hc_idp_df: pd.DataFrame, monthly_level1_df: pd.DataFrame) -> pd.DataFrame:
     if hc_idp_df.empty:
         return pd.DataFrame(columns=["Prod Line AS", "Overall Result"])
@@ -1767,6 +1864,7 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     hc_idp_monthly = pd.DataFrame(data_bundle.get("hc_idp_monthly", []))
     production_data_df = pd.DataFrame(data_bundle.get("production_data", []))
     production_data_by_level_df = pd.DataFrame(data_bundle.get("production_data_by_level", []))
+    td_demand_by_dimension_df = pd.DataFrame(data_bundle.get("td_demand_by_dimension", []))
     td_validation_detail = pd.DataFrame(data_bundle.get("td_validation_detail", []))
     historical_shipment = pd.DataFrame(data_bundle.get("historical_shipment", []))
     pde_alerts = pd.DataFrame(data_bundle.get("pde_alerts", []))
@@ -1852,6 +1950,12 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     )
     page_sheets["Production Data"].append(("02 Table2 Plant-Level1-Level2", _snapshot_to_dataframe(p2_columns, p2_rows)))
 
+    if not td_demand_by_dimension_df.empty:
+        dim_columns, dim_rows = build_production_dimension_table(
+            td_demand_by_dimension_df, ["Brand", "Size", "Variant"]
+        )
+        page_sheets["Production Data"].append(("03 Detail Brand-Size-Variant", _snapshot_to_dataframe(dim_columns, dim_rows)))
+
     page_sheets["Raw Data"].extend(
         [
             ("01 monthly_item", pd.DataFrame(data_bundle.get("monthly_item", []))),
@@ -1864,6 +1968,7 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
             ("08 historical_shipment", historical_shipment),
             ("09 pde_alerts", pde_alerts),
             ("10 request_details", request_details),
+            ("11 td_demand_by_dimension", td_demand_by_dimension_df),
         ]
     )
 
@@ -3385,67 +3490,225 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 className="summary-panel",
                 children=[
                     html.H3("Production Data"),
-                    html.H4("Production Data (By Plant) - Table 1"),
-                    DataTable(
-                        id="production-data-plant-table-1",
-                        columns=production_plant_columns_1,
-                        data=production_plant_rows_1,
-                        style_header=PDE_STYLE_HEADER,
-                        style_cell=PDE_STYLE_CELL,
-                        style_data_conditional=[
-                            *PDE_STYLE_DATA_CONDITIONAL,
-                            {
-                                "if": {
-                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
-                                },
-                                "fontWeight": "700",
-                                "backgroundColor": "#f3f8ff",
-                            },
-                            {
-                                "if": {"filter_query": '{Plant} = "GC Total"'},
-                                "fontWeight": "700",
-                                "backgroundColor": "#edf4ff",
-                            },
+                    dcc.Tabs(
+                        id="production-sub-tabs",
+                        value="prod-summary",
+                        className="sub-tabs",
+                        children=[
+                            dcc.Tab(
+                                label="Summary",
+                                value="prod-summary",
+                                children=[
+                                    html.Div(
+                                        style={"paddingTop": "12px"},
+                                        children=[
+                                            html.H4("Production Data (By Plant) - Table 1"),
+                                            DataTable(
+                                                id="production-data-plant-table-1",
+                                                columns=production_plant_columns_1,
+                                                data=production_plant_rows_1,
+                                                style_header=PDE_STYLE_HEADER,
+                                                style_cell=PDE_STYLE_CELL,
+                                                style_data_conditional=[
+                                                    *PDE_STYLE_DATA_CONDITIONAL,
+                                                    {
+                                                        "if": {
+                                                            "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                                        },
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#f3f8ff",
+                                                    },
+                                                    {
+                                                        "if": {"filter_query": '{Plant} = "GC Total"'},
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#edf4ff",
+                                                    },
+                                                ],
+                                                style_cell_conditional=[
+                                                    {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                                                ],
+                                                page_action="none",
+                                                style_table={"overflowX": "auto"},
+                                                sort_action="native",
+                                                filter_action="none",
+                                            ),
+                                            html.H4("Production Data (By Plant / Level1 / Level2) - Table 2", style={"marginTop": "18px"}),
+                                            DataTable(
+                                                id="production-data-level-table-2",
+                                                columns=production_level_columns_1,
+                                                data=production_level_rows_1,
+                                                style_header=PDE_STYLE_HEADER,
+                                                style_cell=PDE_STYLE_CELL,
+                                                style_data_conditional=[
+                                                    *PDE_STYLE_DATA_CONDITIONAL,
+                                                    {
+                                                        "if": {
+                                                            "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                                        },
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#f3f8ff",
+                                                    },
+                                                    {
+                                                        "if": {"filter_query": '{Plant} = "GC Total"'},
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#edf4ff",
+                                                    },
+                                                ],
+                                                style_cell_conditional=[
+                                                    {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                                                    {"if": {"column_id": "Level1"}, "textAlign": "left"},
+                                                    {"if": {"column_id": "Level2"}, "textAlign": "left"},
+                                                ],
+                                                page_action="none",
+                                                style_table={"overflowX": "auto"},
+                                                sort_action="native",
+                                                filter_action="none",
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            dcc.Tab(
+                                label="Detail by Brand/Size/Variant",
+                                value="prod-detail-dim",
+                                children=[
+                                    html.Div(
+                                        style={"paddingTop": "12px"},
+                                        children=[
+                                            html.H4("TD Demand by Dimension (Brand / Size / Variant)"),
+                                            html.P(
+                                                "Select dimensions to group by and filter values. Data from the latest TD Report (MSU).",
+                                                style={"color": "#666", "fontSize": "13px", "marginBottom": "10px"},
+                                            ),
+                                            html.Div(
+                                                style={
+                                                    "display": "flex",
+                                                    "flexWrap": "wrap",
+                                                    "gap": "12px",
+                                                    "marginBottom": "14px",
+                                                    "alignItems": "flex-end",
+                                                },
+                                                children=[
+                                                    html.Div(
+                                                        style={"minWidth": "200px", "flex": "1"},
+                                                        children=[
+                                                            html.Label("Group By", style={"fontWeight": "600", "fontSize": "13px"}),
+                                                            dcc.Dropdown(
+                                                                id="prod-dim-group-by",
+                                                                options=[{"label": d, "value": d} for d in _PROD_DIM_COLS],
+                                                                value=["Plant", "Brand", "Size", "Variant"],
+                                                                multi=True,
+                                                                placeholder="Select dimensions to group by...",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "120px", "flex": "1"},
+                                                        children=[
+                                                            html.Label("Plant", style={"fontWeight": "600", "fontSize": "13px"}),
+                                                            dcc.Dropdown(
+                                                                id="prod-dim-filter-plant",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                placeholder="All",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "150px", "flex": "1"},
+                                                        children=[
+                                                            html.Label("Brand", style={"fontWeight": "600", "fontSize": "13px"}),
+                                                            dcc.Dropdown(
+                                                                id="prod-dim-filter-brand",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                placeholder="All",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "120px", "flex": "1"},
+                                                        children=[
+                                                            html.Label("Size", style={"fontWeight": "600", "fontSize": "13px"}),
+                                                            dcc.Dropdown(
+                                                                id="prod-dim-filter-size",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                placeholder="All",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "120px", "flex": "1"},
+                                                        children=[
+                                                            html.Label("Variant", style={"fontWeight": "600", "fontSize": "13px"}),
+                                                            dcc.Dropdown(
+                                                                id="prod-dim-filter-variant",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                placeholder="All",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "120px", "flex": "1"},
+                                                        children=[
+                                                            html.Label("Prod Line", style={"fontWeight": "600", "fontSize": "13px"}),
+                                                            dcc.Dropdown(
+                                                                id="prod-dim-filter-prodline",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                placeholder="All",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                    html.Div(
+                                                        style={"minWidth": "100px", "flex": "1"},
+                                                        children=[
+                                                            html.Label("Type", style={"fontWeight": "600", "fontSize": "13px"}),
+                                                            dcc.Dropdown(
+                                                                id="prod-dim-filter-type",
+                                                                options=[],
+                                                                value=[],
+                                                                multi=True,
+                                                                placeholder="All",
+                                                            ),
+                                                        ],
+                                                    ),
+                                                ],
+                                            ),
+                                            DataTable(
+                                                id="production-dim-detail-table",
+                                                columns=[],
+                                                data=[],
+                                                style_header=PDE_STYLE_HEADER,
+                                                style_cell=PDE_STYLE_CELL,
+                                                style_data_conditional=[
+                                                    *PDE_STYLE_DATA_CONDITIONAL,
+                                                    {
+                                                        "if": {"filter_query": '{Plant} = "Total" || {Brand} = "Total" || {Lineup} = "Total" || {Size} = "Total" || {Variant} = "Total" || {Type} = "Total" || {Prod Line} = "Total"'},
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#f3f8ff",
+                                                    },
+                                                ],
+                                                style_cell_conditional=[
+                                                    {"if": {"column_id": d}, "textAlign": "left"} for d in _PROD_DIM_COLS
+                                                ],
+                                                page_action="none",
+                                                style_table={"overflowX": "auto"},
+                                                sort_action="native",
+                                                filter_action="none",
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
                         ],
-                        style_cell_conditional=[
-                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
-                        ],
-                        page_action="none",
-                        style_table={"overflowX": "auto"},
-                        sort_action="native",
-                        filter_action="none",
-                    ),
-                    html.H4("Production Data (By Plant / Level1 / Level2) - Table 2", style={"marginTop": "18px"}),
-                    DataTable(
-                        id="production-data-level-table-2",
-                        columns=production_level_columns_1,
-                        data=production_level_rows_1,
-                        style_header=PDE_STYLE_HEADER,
-                        style_cell=PDE_STYLE_CELL,
-                        style_data_conditional=[
-                            *PDE_STYLE_DATA_CONDITIONAL,
-                            {
-                                "if": {
-                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
-                                },
-                                "fontWeight": "700",
-                                "backgroundColor": "#f3f8ff",
-                            },
-                            {
-                                "if": {"filter_query": '{Plant} = "GC Total"'},
-                                "fontWeight": "700",
-                                "backgroundColor": "#edf4ff",
-                            },
-                        ],
-                        style_cell_conditional=[
-                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
-                            {"if": {"column_id": "Level1"}, "textAlign": "left"},
-                            {"if": {"column_id": "Level2"}, "textAlign": "left"},
-                        ],
-                        page_action="none",
-                        style_table={"overflowX": "auto"},
-                        sort_action="native",
-                        filter_action="none",
                     ),
                 ],
             ),
@@ -4025,6 +4288,58 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             production_plant_rows_1,
             production_level_columns_1,
             production_level_rows_1,
+        )
+
+    # ── Production Dimension Detail callback ──────────────────────
+    @app.callback(
+        Output("prod-dim-filter-plant", "options"),
+        Output("prod-dim-filter-brand", "options"),
+        Output("prod-dim-filter-size", "options"),
+        Output("prod-dim-filter-variant", "options"),
+        Output("prod-dim-filter-prodline", "options"),
+        Output("prod-dim-filter-type", "options"),
+        Output("production-dim-detail-table", "columns"),
+        Output("production-dim-detail-table", "data"),
+        Input("data-store", "data"),
+        Input("prod-dim-group-by", "value"),
+        Input("prod-dim-filter-plant", "value"),
+        Input("prod-dim-filter-brand", "value"),
+        Input("prod-dim-filter-size", "value"),
+        Input("prod-dim-filter-variant", "value"),
+        Input("prod-dim-filter-prodline", "value"),
+        Input("prod-dim-filter-type", "value"),
+    )
+    def update_production_dimension_detail(
+        data, group_by, plant_filter, brand_filter, size_filter, variant_filter, prodline_filter, type_filter
+    ):
+        td_dim_df = pd.DataFrame((data or {}).get("td_demand_by_dimension", []))
+        dim_options = build_production_dimension_options(td_dim_df)
+        filters: Dict[str, List[str]] = {}
+        if plant_filter:
+            filters["Plant"] = plant_filter
+        if brand_filter:
+            filters["Brand"] = brand_filter
+        if size_filter:
+            filters["Size"] = size_filter
+        if variant_filter:
+            filters["Variant"] = variant_filter
+        if prodline_filter:
+            filters["Prod Line"] = prodline_filter
+        if type_filter:
+            filters["Type"] = type_filter
+        selected_group_by = group_by if group_by else ["Plant", "Brand", "Size", "Variant"]
+        dim_columns, dim_rows = build_production_dimension_table(
+            td_dim_df, selected_group_by, filters
+        )
+        return (
+            dim_options.get("Plant", []),
+            dim_options.get("Brand", []),
+            dim_options.get("Size", []),
+            dim_options.get("Variant", []),
+            dim_options.get("Prod Line", []),
+            dim_options.get("Type", []),
+            dim_columns,
+            dim_rows,
         )
 
     @app.callback(

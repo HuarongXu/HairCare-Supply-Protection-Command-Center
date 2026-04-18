@@ -922,12 +922,24 @@
             <h2>🏭 Production Data</h2>
             <p>工厂生产数据，展示计划产量和实际进度。</p>
 
-            <h3>两张核心表</h3>
+            <h3>两个子标签页</h3>
+            <p>Production Data 页面分为 <strong>Summary</strong> 和 <strong>Detail by Brand/Size/Variant</strong> 两个子标签页。</p>
+
+            <h4>Sub-tab 1: Summary</h4>
             <table class="doc-table">
                 <tr><th>表</th><th>维度</th><th>说明</th></tr>
                 <tr><td>Table 1: By Plant</td><td>Plant</td><td>按工厂汇总，含 HP Total / XQ Total / TC Total / GC Total 汇总行</td></tr>
                 <tr><td>Table 2: By Plant / Level1 / Level2</td><td>Plant + Level1 + Level2</td><td>按工厂→分类→子分类 三级展开</td></tr>
             </table>
+
+            <h4>Sub-tab 2: Detail by Brand/Size/Variant</h4>
+            <p>生产数据关联 TD 报表维度标签，支持按多种维度聚合和筛选。</p>
+            <ul>
+                <li><strong>Group By 下拉框</strong>：选择聚合维度（默认 Plant / Brand / Size / Variant），可从 Plant、Brand、Lineup、Size、Type、NI/Conversion、Prod Line、Variant 中自由组合</li>
+                <li><strong>6 个筛选下拉框</strong>：Brand、Size、Variant、Plant、Lineup、Prod Line — 支持多选 + Select All</li>
+                <li><strong>数据列</strong>：MTD、Left Production、Current Month Total、以及未来月份列（当月列不显示，避免重复）</li>
+                <li><strong>Total 行</strong>：底部自动附加汇总行</li>
+            </ul>
 
             <h4>工厂分组</h4>
             <ul>
@@ -1160,8 +1172,8 @@
                 <tr>
                     <td><span class="tag tag-amber">production</span></td>
                     <td>Production Data</td>
-                    <td>读取 Production Vol 文件，按工厂和 Level 汇总</td>
-                    <td>production_data_summary.csv, production_data_summary_by_level.csv</td>
+                    <td>读取 Production Vol 文件，按工厂和 Level 汇总；关联 TD 报表维度标签生成明细</td>
+                    <td>production_data_summary.csv, production_data_summary_by_level.csv, td_demand_by_dimension.csv</td>
                 </tr>
             </table>
 
