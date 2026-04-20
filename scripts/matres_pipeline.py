@@ -3059,6 +3059,146 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Data source status inspection
+# ---------------------------------------------------------------------------
+
+
+def collect_data_source_status(cfg: PipelineConfig) -> list[dict[str, str]]:
+    """Scan all data sources used by the pipeline and return their file info.
+
+    Returns a list of dicts, each with keys:
+      - Category: which pipeline stage the source belongs to
+      - Data Source: human-readable label
+      - File Name: the file name (or "Not Found")
+      - Version Date: date extracted from the filename or file modification time
+      - Modified Time: last modification timestamp of the file
+      - Status: "OK" or "Missing"
+    """
+    tz = ZoneInfo(cfg.time_zone) if cfg.time_zone else timezone.utc
+    records: list[dict[str, str]] = []
+
+    def _fmt_mtime(path: Path) -> str:
+        try:
+            ts = datetime.fromtimestamp(path.stat().st_mtime, tz=tz)
+            return ts.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ""
+
+    def _add(category: str, label: str, path: Optional[Path], version_date: str = "") -> None:
+        if path is not None and path.exists():
+            records.append({
+                "Category": category,
+                "Data Source": label,
+                "File Name": path.name,
+                "Version Date": version_date or "",
+                "Modified Time": _fmt_mtime(path),
+                "Status": "✅ OK",
+            })
+        else:
+            records.append({
+                "Category": category,
+                "Data Source": label,
+                "File Name": path.name if path else "Not configured",
+                "Version Date": "",
+                "Modified Time": "",
+                "Status": "❌ Missing",
+            })
+
+    # ── 1. Supply: MR Upload Request Form ──
+    _add(
+        "Supply Protection",
+        "MR Upload Request Form",
+        cfg.workbook_path,
+        "",
+    )
+
+    # ── 2. Supply: Level1 Mapping (Seg Code List) ──
+    _add(
+        "Supply Protection",
+        "Level1 Mapping (Seg Code List)",
+        cfg.level1_workbook_path,
+        "",
+    )
+
+    # ── 3. Demand: HC IDP HANA TD Reports ──
+    data_base = cfg.data_base_dir
+    hc_reports = list_hc_idp_reports_sorted(data_base)
+    if hc_reports:
+        for version_date, report_path in hc_reports:
+            _add("Demand (HC IDP)", "HC IDP HANA TD Report", report_path, version_date)
+    else:
+        _add("Demand (HC IDP)", "HC IDP HANA TD Report", None, "")
+
+    # ── 4. Production: MTD reports ──
+    prod_root = cfg.production_data_dir
+    if prod_root.exists():
+        all_prod_files = [
+            p for p in prod_root.glob("*.xls*")
+            if p.is_file() and not p.name.startswith("~$")
+        ]
+        mtd_files = sorted([
+            p for p in all_prod_files
+            if "mtd" in p.name.lower() and "production vol" not in p.name.lower()
+        ])
+        prod_vol_files = sorted([
+            p for p in all_prod_files
+            if "production vol" in p.name.lower()
+        ])
+        parameter_files = sorted([
+            p for p in prod_root.glob("Parameter*.xls*")
+            if p.is_file() and not p.name.startswith("~$")
+        ])
+
+        if mtd_files:
+            for f in mtd_files:
+                vd = extract_date_from_filename(f) or ""
+                _add("Production Data", "MTD Report", f, vd)
+        else:
+            _add("Production Data", "MTD Report", None, "")
+
+        if prod_vol_files:
+            for f in prod_vol_files:
+                vd = extract_date_from_filename(f) or ""
+                _add("Production Data", "Production Volume", f, vd)
+        else:
+            _add("Production Data", "Production Volume", None, "")
+
+        if parameter_files:
+            for f in parameter_files:
+                _add("Production Data", "Parameter (9SU/Technology)", f, "")
+        else:
+            _add("Production Data", "Parameter (9SU/Technology)", None, "")
+    else:
+        _add("Production Data", "Production Data Directory", prod_root, "")
+
+    # ── 5. Config: Requester Roles ──
+    roles_path_str = None
+    try:
+        config_path = DEFAULT_CONFIG_PATH
+        if config_path.exists():
+            with config_path.open("r", encoding="utf-8") as f:
+                raw_cfg = json.load(f)
+            roles_path_str = raw_cfg.get("requester_roles_path")
+    except Exception:
+        pass
+    if roles_path_str:
+        roles_path = Path.cwd() / roles_path_str
+        _add("Config", "Requester Roles", roles_path, "")
+    else:
+        _add("Config", "Requester Roles", None, "")
+
+    # ── 6. History file ──
+    _add("Pipeline Output", "History Store", cfg.history_path, "")
+
+    # ── 7. Processed CSV files ──
+    for key, filename in PROCESSED_FILES.items():
+        csv_path = cfg.processed_dir / filename
+        _add("Pipeline Output", f"CSV: {filename}", csv_path, "")
+
+    return records
+
+
+# ---------------------------------------------------------------------------
 # Staged pipeline execution  ── individual stage runners
 # ---------------------------------------------------------------------------
 

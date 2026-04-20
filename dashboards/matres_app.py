@@ -3951,6 +3951,23 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
                             dcc.Store(id="admin-masterdata-store", data=None),
                         ],
                     ),
+                    # ── Card 7: Data Source Status ──
+                    html.Div(
+                        className="admin-card",
+                        children=[
+                            html.H3("\U0001F4CB Data Source Status"),
+                            html.P("Check timestamps of all data source files to verify they are up to date."),
+                            html.Button("Scan Data Sources", id="admin-datasource-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
+                            html.Span("", id="admin-datasource-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
+                            dcc.Loading(
+                                html.Div(
+                                    id="admin-datasource-table-wrapper",
+                                    style={"marginTop": "10px"},
+                                    children=[],
+                                ),
+                            ),
+                        ],
+                    ),
                 ],
             ),
         ],
@@ -4932,6 +4949,87 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
         except Exception:
             logging.exception("Failed to export master data report")
             raise PreventUpdate
+
+    # ── Data Source Status ─────────────────────────────────────────
+    @app.callback(
+        Output("admin-datasource-table-wrapper", "children"),
+        Output("admin-datasource-status", "children"),
+        Input("admin-datasource-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def admin_datasource_scan(n_clicks):
+        if not n_clicks:
+            raise PreventUpdate
+        try:
+            sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
+            from matres_pipeline import PipelineConfig, collect_data_source_status
+
+            pipeline_cfg = PipelineConfig.from_dict(
+                json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            )
+            records = collect_data_source_status(pipeline_cfg)
+
+            if not records:
+                return (
+                    html.P("No data sources found.",
+                           style={"color": "#d97706", "fontWeight": "600"}),
+                    "",
+                )
+
+            ok_count = sum(1 for r in records if "OK" in r.get("Status", ""))
+            missing_count = sum(1 for r in records if "Missing" in r.get("Status", ""))
+            status_text = f"Scanned {len(records)} sources: {ok_count} OK, {missing_count} missing"
+
+            table = DataTable(
+                id="admin-datasource-result-table",
+                columns=[
+                    {"name": "Category", "id": "Category"},
+                    {"name": "Data Source", "id": "Data Source"},
+                    {"name": "File Name", "id": "File Name"},
+                    {"name": "Version Date", "id": "Version Date"},
+                    {"name": "Modified Time", "id": "Modified Time"},
+                    {"name": "Status", "id": "Status"},
+                ],
+                data=records,
+                style_header=PDE_STYLE_HEADER,
+                style_cell=PDE_STYLE_CELL,
+                style_data_conditional=[
+                    *PDE_STYLE_DATA_CONDITIONAL,
+                    {
+                        "if": {"filter_query": '{Status} contains "OK"'},
+                        "color": "#16a34a",
+                        "fontWeight": "600",
+                    },
+                    {
+                        "if": {"filter_query": '{Status} contains "Missing"'},
+                        "color": "#dc2626",
+                        "fontWeight": "700",
+                        "backgroundColor": "#fef2f2",
+                    },
+                    {
+                        "if": {"filter_query": '{Category} = "Pipeline Output"'},
+                        "color": "#6b7280",
+                        "fontSize": "12px",
+                    },
+                ],
+                style_cell_conditional=[
+                    {"if": {"column_id": "Category"}, "textAlign": "left", "minWidth": "130px", "width": "160px"},
+                    {"if": {"column_id": "Data Source"}, "textAlign": "left", "minWidth": "180px", "width": "220px"},
+                    {"if": {"column_id": "File Name"}, "textAlign": "left", "minWidth": "250px", "width": "350px"},
+                    {"if": {"column_id": "Version Date"}, "textAlign": "center", "minWidth": "100px", "width": "120px"},
+                    {"if": {"column_id": "Modified Time"}, "textAlign": "center", "minWidth": "160px", "width": "180px"},
+                    {"if": {"column_id": "Status"}, "textAlign": "center", "minWidth": "80px", "width": "100px"},
+                ],
+                page_size=25,
+                sort_action="native",
+                filter_action="native",
+                style_table={"overflowX": "auto", "maxHeight": "500px", "overflowY": "auto"},
+            )
+
+            return table, status_text
+        except Exception:
+            logging.exception("Failed to scan data sources")
+            return html.P("Scan failed. Check server logs.", style={"color": "#dc2626"}), ""
 
 
 def create_app() -> Dash:
