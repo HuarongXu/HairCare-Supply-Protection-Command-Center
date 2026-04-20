@@ -4844,39 +4844,44 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
             flag_file.parent.mkdir(parents=True, exist_ok=True)
             flag_file.write_text("auto", encoding="utf-8")
 
-            restart_cmd = [sys.executable] + sys.argv
-            logging.info("Restarting application via detached subprocess: %s", restart_cmd)
+            logging.info("Preparing restart ...")
 
             if sys.platform == "win32":
-                # Write a temporary .bat file that starts the dashboard.
-                # Using a bat file avoids quoting issues with spaces in paths
-                # and cmd /k keeps the window open so errors are visible.
+                # Write a .bat file that restarts the dashboard.
+                # Use os.startfile() to launch it — most reliable on Windows,
+                # fully independent of the parent process.
                 restart_bat = _PROJECT_ROOT / "data" / "processed" / "_restart.bat"
                 restart_bat.parent.mkdir(parents=True, exist_ok=True)
+                py_exe = str(Path(sys.executable).resolve())
+                app_script = str(Path(sys.argv[0]).resolve())
+                project_dir = str(_PROJECT_ROOT.resolve())
                 bat_lines = [
                     "@echo off",
                     "chcp 65001 >nul",
                     "title MatRes Dashboard Server",
-                    f'cd /d "{_PROJECT_ROOT}"',
-                    f'echo [INFO] Starting dashboard from: {_PROJECT_ROOT}',
-                    f'echo [INFO] Python: {sys.executable}',
-                    f'"{sys.executable}" "{Path(sys.argv[0]).resolve()}"',
+                    f'cd /d "{project_dir}"',
+                    "echo ========================================",
+                    f'echo [INFO] Project: {project_dir}',
+                    f'echo [INFO] Python:  {py_exe}',
+                    f'echo [INFO] Script:  {app_script}',
+                    "echo ========================================",
                     "echo.",
-                    "echo [ERROR] Dashboard exited unexpectedly. See error above.",
+                    "echo [INFO] Waiting 2 seconds for old process to exit ...",
+                    "timeout /t 2 /nobreak >nul",
+                    f'"{py_exe}" "{app_script}"',
+                    "echo.",
+                    "echo ========================================",
+                    "echo [ERROR] Dashboard exited. See error above.",
+                    "echo ========================================",
                     "pause",
                 ]
                 restart_bat.write_text("\r\n".join(bat_lines), encoding="utf-8")
+                logging.info("Restart bat written to: %s", restart_bat)
 
-                CREATE_NEW_CONSOLE = 0x00000010
-                CREATE_NEW_PROCESS_GROUP = 0x00000200
-                subprocess.Popen(
-                    [str(restart_bat)],
-                    cwd=str(_PROJECT_ROOT),
-                    creationflags=CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
-                    close_fds=True,
-                )
-                logging.info("Restart bat launched. Exiting parent in 1s ...")
-                time.sleep(1)
+                # os.startfile launches the bat completely detached from this process
+                os.startfile(str(restart_bat))
+                logging.info("Restart bat launched via os.startfile. Exiting in 2s ...")
+                time.sleep(2)
                 os._exit(0)
             else:
                 # On Unix, execv works reliably
