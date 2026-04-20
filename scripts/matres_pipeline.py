@@ -168,6 +168,82 @@ def normalize_material_key(value: object) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers – extracted from duplicate inner definitions
+# ---------------------------------------------------------------------------
+
+def _parse_numeric_series(series: pd.Series) -> pd.Series:
+    """Clean and convert a Series to numeric (for production volume data)."""
+    cleaned = (
+        series.fillna("")
+        .astype(str)
+        .str.replace("\u00a0", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.replace(" ", "", regex=False)
+        .str.strip()
+    )
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
+
+
+def _sort_month_values(values: Iterable[str]) -> list[str]:
+    """Sort month labels (YYYY-MM) chronologically."""
+    def key_func(value: str):
+        parsed = pd.Period(str(value), freq="M")
+        return parsed.start_time
+    return sorted({str(v) for v in values if str(v).strip()}, key=key_func)
+
+
+def _normalize_month_label(raw_label: str) -> Optional[str]:
+    """Normalise month label from either MM.YYYY or YYYY-MM format."""
+    text = str(raw_label).strip()
+    dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
+    if dot_match:
+        month, year = dot_match.groups()
+        return f"{year}-{month}"
+    dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
+    if dash_match:
+        return text
+    return None
+
+
+def _pick_column(
+    df: pd.DataFrame,
+    candidates: list[str],
+    contains: list[str] | None = None,
+) -> Optional[str]:
+    """Find a column in *df* by exact lower-case name or by substring tokens."""
+    normalized_map = {str(col).strip().lower(): col for col in df.columns}
+    for name in candidates:
+        if name in normalized_map:
+            return normalized_map[name]
+    if contains:
+        for col in df.columns:
+            key = str(col).strip().lower()
+            if all(token in key for token in contains):
+                return col
+    return None
+
+
+def _discover_production_reports(root: Path) -> tuple[list[Path], list[Path]]:
+    """Scan *root* for MTD and Production Vol Excel files.
+
+    Returns ``(mtd_reports, production_vol_reports)`` sorted by name.
+    """
+    all_reports = [
+        p for p in root.glob("*.xls*")
+        if p.is_file() and not p.name.startswith("~$")
+    ]
+    mtd_reports = sorted(
+        p for p in all_reports
+        if "mtd" in p.name.lower() and "production vol" not in p.name.lower()
+    )
+    production_vol_reports = sorted(
+        p for p in all_reports
+        if "production vol" in p.name.lower()
+    )
+    return mtd_reports, production_vol_reports
+
+
 def read_sufactor_mapping(cfg: PipelineConfig) -> pd.DataFrame:
     workbook = cfg.workbook_path
     if workbook is None or not workbook.exists():
@@ -182,22 +258,9 @@ def read_sufactor_mapping(cfg: PipelineConfig) -> pd.DataFrame:
     if raw.empty:
         return pd.DataFrame(columns=["material_key", "numer", "denom"])
 
-    normalized_map = {str(col).strip().lower(): col for col in raw.columns}
-
-    def pick_column(candidates: list[str], contains: list[str] | None = None) -> Optional[str]:
-        for name in candidates:
-            if name in normalized_map:
-                return normalized_map[name]
-        if contains:
-            for col in raw.columns:
-                key = str(col).strip().lower()
-                if all(token in key for token in contains):
-                    return col
-        return None
-
-    material_col = pick_column(["material"], ["material"])
-    numer_col = pick_column(["numer.", "numer"], ["numer"])
-    denom_col = pick_column(["denom.", "denom"], ["denom"])
+    material_col = _pick_column(raw, ["material"], ["material"])
+    numer_col = _pick_column(raw, ["numer.", "numer"], ["numer"])
+    denom_col = _pick_column(raw, ["denom.", "denom"], ["denom"])
     required_cols = [material_col, numer_col, denom_col]
     if any(col is None for col in required_cols):
         logging.warning("Sufactor sheet missing required columns (Material/Numer./Denom.)")
@@ -651,61 +714,7 @@ def read_production_volume_report(report_path: Path) -> pd.DataFrame:
 def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFrame:
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
-    def parse_numeric(series: pd.Series) -> pd.Series:
-        cleaned = (
-            series.fillna("")
-            .astype(str)
-            .str.replace("\u00a0", "", regex=False)
-            .str.replace(",", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.strip()
-        )
-        return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
-
-    def sort_month_values(values: Iterable[str]) -> list[str]:
-        def key_func(value: str):
-            parsed = pd.Period(str(value), freq="M")
-            return parsed.start_time
-
-        return sorted({str(v) for v in values if str(v).strip()}, key=key_func)
-
-    def normalize_month_label(raw_label: str) -> Optional[str]:
-        text = str(raw_label).strip()
-        dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
-        if dot_match:
-            month, year = dot_match.groups()
-            return f"{year}-{month}"
-
-        dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
-        if dash_match:
-            return text
-
-        return None
-
-    def pick_column(df: pd.DataFrame, candidates: list[str], contains: list[str] | None = None) -> Optional[str]:
-        normalized_map = {str(col).strip().lower(): col for col in df.columns}
-        for name in candidates:
-            if name in normalized_map:
-                return normalized_map[name]
-        if contains:
-            for col in df.columns:
-                key = str(col).strip().lower()
-                if all(token in key for token in contains):
-                    return col
-        return None
-
-    all_reports = [
-        p for p in root.glob("*.xls*")
-        if p.is_file() and not p.name.startswith("~$")
-    ]
-    mtd_reports = sorted([
-        p for p in all_reports
-        if "mtd" in p.name.lower() and "production vol" not in p.name.lower()
-    ])
-    production_vol_reports = sorted([
-        p for p in all_reports
-        if "production vol" in p.name.lower()
-    ])
+    mtd_reports, production_vol_reports = _discover_production_reports(root)
 
     if not mtd_reports:
         logging.warning("No MTD report found under %s", root)
@@ -727,9 +736,9 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
             continue
 
         raw = standardize_column_names(raw)
-        start_date_col = pick_column(raw, ["startdate", "start date"], ["start", "date"])
-        plant_col = pick_column(raw, ["plant"], ["plant"])
-        deliv_col = pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
+        start_date_col = _pick_column(raw, ["startdate", "start date"], ["start", "date"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        deliv_col = _pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
         required_cols = [start_date_col, plant_col, deliv_col]
         if any(col is None for col in required_cols):
             logging.warning("MTD report missing required columns in %s", report_path)
@@ -743,7 +752,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
         if working.empty:
             continue
 
-        deliv_qty = parse_numeric(working["Deliv. Quantity"])
+        deliv_qty = _parse_numeric_series(working["Deliv. Quantity"])
         working["mtd_qty"] = deliv_qty / 1000.0
         working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
         working = working[working["Plant"] != ""].copy()
@@ -784,11 +793,11 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
         if raw.empty:
             continue
 
-        category_col = pick_column(raw, ["categories / members"], ["categories"])
-        plant_col = pick_column(raw, ["plant"], ["plant"])
-        material_col = pick_column(raw, ["material"], ["material"])
-        mrp_elements_col = pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
-        prev_perd_col = pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
+        category_col = _pick_column(raw, ["categories / members"], ["categories"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = _pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
+        prev_perd_col = _pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
         d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
         if category_col is None or plant_col is None or material_col is None or mrp_elements_col is None or prev_perd_col is None:
             logging.warning("Production Vol report missing required columns (Category/Plant/Material/MRP Elements): %s", report_path)
@@ -802,7 +811,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
                 continue
             if not passed_prev_perd:
                 continue
-            normalized = normalize_month_label(str(col).strip())
+            normalized = _normalize_month_label(str(col).strip())
             if normalized:
                 month_col_map[col] = normalized
 
@@ -890,7 +899,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
                 )
 
         for month_col in normalized_month_cols:
-            month_values = parse_numeric(working[month_col])
+            month_values = _parse_numeric_series(working[month_col])
             if is_xqtc_wip:
                 su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
                 working[month_col] = month_values * su9_values / 1000.0
@@ -917,7 +926,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
     else:
         production_vol = pd.DataFrame(columns=["Plant"])
 
-    sorted_months = sort_month_values(month_labels)
+    sorted_months = _sort_month_values(month_labels)
     if not sorted_months:
         return pd.DataFrame(columns=base_columns)
 
@@ -979,61 +988,7 @@ def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFra
 def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> pd.DataFrame:
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
-    def parse_numeric(series: pd.Series) -> pd.Series:
-        cleaned = (
-            series.fillna("")
-            .astype(str)
-            .str.replace("\u00a0", "", regex=False)
-            .str.replace(",", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.strip()
-        )
-        return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
-
-    def sort_month_values(values: Iterable[str]) -> list[str]:
-        def key_func(value: str):
-            parsed = pd.Period(str(value), freq="M")
-            return parsed.start_time
-
-        return sorted({str(v) for v in values if str(v).strip()}, key=key_func)
-
-    def normalize_month_label(raw_label: str) -> Optional[str]:
-        text = str(raw_label).strip()
-        dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
-        if dot_match:
-            month, year = dot_match.groups()
-            return f"{year}-{month}"
-
-        dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
-        if dash_match:
-            return text
-
-        return None
-
-    def pick_column(df: pd.DataFrame, candidates: list[str], contains: list[str] | None = None) -> Optional[str]:
-        normalized_map = {str(col).strip().lower(): col for col in df.columns}
-        for name in candidates:
-            if name in normalized_map:
-                return normalized_map[name]
-        if contains:
-            for col in df.columns:
-                key = str(col).strip().lower()
-                if all(token in key for token in contains):
-                    return col
-        return None
-
-    all_reports = [
-        p for p in root.glob("*.xls*")
-        if p.is_file() and not p.name.startswith("~$")
-    ]
-    mtd_reports = sorted([
-        p for p in all_reports
-        if "mtd" in p.name.lower() and "production vol" not in p.name.lower()
-    ])
-    production_vol_reports = sorted([
-        p for p in all_reports
-        if "production vol" in p.name.lower()
-    ])
+    mtd_reports, production_vol_reports = _discover_production_reports(root)
 
     if not production_vol_reports:
         logging.warning("No Production Vol report found under %s", root)
@@ -1059,10 +1014,10 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
             continue
 
         raw = standardize_column_names(raw)
-        start_date_col = pick_column(raw, ["startdate", "start date"], ["start", "date"])
-        plant_col = pick_column(raw, ["plant"], ["plant"])
-        material_col = pick_column(raw, ["material", "material number"], ["material"])
-        deliv_col = pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
+        start_date_col = _pick_column(raw, ["startdate", "start date"], ["start", "date"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material", "material number"], ["material"])
+        deliv_col = _pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
         required_cols = [start_date_col, plant_col, material_col, deliv_col]
         if any(col is None for col in required_cols):
             logging.warning("MTD report missing required columns in %s", report_path)
@@ -1083,7 +1038,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
         if working.empty:
             continue
 
-        deliv_qty = parse_numeric(working["Deliv. Quantity"])
+        deliv_qty = _parse_numeric_series(working["Deliv. Quantity"])
         working["MTD_VALUE"] = deliv_qty / 1000.0
         working["Month"] = working["StartDateParsed"].dt.to_period("M").astype(str)
 
@@ -1130,11 +1085,11 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
         if raw.empty:
             continue
 
-        category_col = pick_column(raw, ["categories / members"], ["categories"])
-        plant_col = pick_column(raw, ["plant"], ["plant"])
-        material_col = pick_column(raw, ["material"], ["material"])
-        mrp_elements_col = pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
-        prev_perd_col = pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
+        category_col = _pick_column(raw, ["categories / members"], ["categories"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = _pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
+        prev_perd_col = _pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
         d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
         if any(col is None for col in [category_col, plant_col, material_col, mrp_elements_col, prev_perd_col]):
             logging.warning("Production Vol detail report missing required columns (Category/Plant/Material/MRP Elements) in %s", report_path)
@@ -1148,7 +1103,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
                 continue
             if not passed_prev_perd:
                 continue
-            normalized = normalize_month_label(str(col).strip())
+            normalized = _normalize_month_label(str(col).strip())
             if normalized:
                 month_col_map[col] = normalized
 
@@ -1236,7 +1191,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
                 )
 
         for month_col in normalized_month_cols:
-            month_values = parse_numeric(working[month_col])
+            month_values = _parse_numeric_series(working[month_col])
             if is_xqtc_wip:
                 su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
                 working[month_col] = month_values * su9_values / 1000.0
@@ -1270,7 +1225,7 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
         .reset_index()
     )
 
-    sorted_months = sort_month_values(month_labels)
+    sorted_months = _sort_month_values(month_labels)
     month_window = sorted_months
     if not month_window:
         return pd.DataFrame(columns=base_columns)
@@ -1441,58 +1396,7 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
     # ─── 2. Reuse the same production data pipeline as summary-by-level ───
     production_root = cfg.production_data_dir
 
-    def parse_numeric(series: pd.Series) -> pd.Series:
-        cleaned = (
-            series.fillna("")
-            .astype(str)
-            .str.replace("\u00a0", "", regex=False)
-            .str.replace(",", "", regex=False)
-            .str.replace(" ", "", regex=False)
-            .str.strip()
-        )
-        return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
-
-    def sort_month_values(values: Iterable[str]) -> list[str]:
-        def key_func(value: str):
-            parsed = pd.Period(str(value), freq="M")
-            return parsed.start_time
-        return sorted({str(v) for v in values if str(v).strip()}, key=key_func)
-
-    def normalize_month_label(raw_label: str) -> Optional[str]:
-        text = str(raw_label).strip()
-        dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
-        if dot_match:
-            month, year = dot_match.groups()
-            return f"{year}-{month}"
-        dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
-        if dash_match:
-            return text
-        return None
-
-    def pick_column(df: pd.DataFrame, candidates: list[str], contains: list[str] | None = None) -> Optional[str]:
-        normalized_map = {str(col).strip().lower(): col for col in df.columns}
-        for name in candidates:
-            if name in normalized_map:
-                return normalized_map[name]
-        if contains:
-            for col in df.columns:
-                key = str(col).strip().lower()
-                if all(token in key for token in contains):
-                    return col
-        return None
-
-    all_reports = [
-        p for p in production_root.glob("*.xls*")
-        if p.is_file() and not p.name.startswith("~$")
-    ]
-    mtd_reports = sorted([
-        p for p in all_reports
-        if "mtd" in p.name.lower() and "production vol" not in p.name.lower()
-    ])
-    production_vol_reports = sorted([
-        p for p in all_reports
-        if "production vol" in p.name.lower()
-    ])
+    mtd_reports, production_vol_reports = _discover_production_reports(production_root)
 
     if not production_vol_reports:
         return pd.DataFrame(columns=base_cols)
@@ -1509,10 +1413,10 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
         if raw.empty:
             continue
         raw = standardize_column_names(raw)
-        start_date_col = pick_column(raw, ["startdate", "start date"], ["start", "date"])
-        plant_col = pick_column(raw, ["plant"], ["plant"])
-        material_col = pick_column(raw, ["material", "material number"], ["material"])
-        deliv_col = pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
+        start_date_col = _pick_column(raw, ["startdate", "start date"], ["start", "date"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material", "material number"], ["material"])
+        deliv_col = _pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
         if any(c is None for c in [start_date_col, plant_col, material_col, deliv_col]):
             continue
         working = raw[[start_date_col, plant_col, material_col, deliv_col]].copy()
@@ -1526,7 +1430,7 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
         working = working[(working["Plant"] != "") & (working["Material"] != "")].copy()
         if working.empty:
             continue
-        working["MTD_VALUE"] = parse_numeric(working["Deliv. Quantity"]) / 1000.0
+        working["MTD_VALUE"] = _parse_numeric_series(working["Deliv. Quantity"]) / 1000.0
         working["Month"] = working["StartDateParsed"].dt.to_period("M").astype(str)
         working["material_key"] = working["Material"].apply(normalize_material_key)
         working = working[working["material_key"].astype(bool)].copy()
@@ -1559,11 +1463,11 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
             continue
         if raw.empty:
             continue
-        category_col = pick_column(raw, ["categories / members"], ["categories"])
-        plant_col = pick_column(raw, ["plant"], ["plant"])
-        material_col = pick_column(raw, ["material"], ["material"])
-        mrp_elements_col = pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
-        prev_perd_col = pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
+        category_col = _pick_column(raw, ["categories / members"], ["categories"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = _pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
+        prev_perd_col = _pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
         d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
         if any(c is None for c in [category_col, plant_col, material_col, mrp_elements_col, prev_perd_col]):
             continue
@@ -1576,7 +1480,7 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
                 continue
             if not passed_prev_perd:
                 continue
-            normalized = normalize_month_label(str(col).strip())
+            normalized = _normalize_month_label(str(col).strip())
             if normalized:
                 month_col_map[col] = normalized
 
@@ -1637,7 +1541,7 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
                 continue
 
         for month_col in normalized_month_cols:
-            month_values = parse_numeric(working[month_col])
+            month_values = _parse_numeric_series(working[month_col])
             if is_xqtc_wip:
                 su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
                 working[month_col] = month_values * su9_values / 1000.0
@@ -1665,7 +1569,7 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
         .reset_index()
     )
 
-    sorted_months = sort_month_values(month_labels)
+    sorted_months = _sort_month_values(month_labels)
     if not sorted_months:
         return pd.DataFrame(columns=base_cols)
     month_window = sorted_months
@@ -2817,31 +2721,6 @@ def append_history_snapshot(df: pd.DataFrame, cfg: PipelineConfig) -> None:
 # Master Data Update report  ── identify missing Seg mapping & SU factor
 # ---------------------------------------------------------------------------
 
-def _parse_numeric_series(series: pd.Series) -> pd.Series:
-    """Clean and convert a series to numeric (for production volume checks)."""
-    cleaned = (
-        series.fillna("")
-        .astype(str)
-        .str.replace("\u00a0", "", regex=False)
-        .str.replace(",", "", regex=False)
-        .str.replace(" ", "", regex=False)
-        .str.strip()
-    )
-    return pd.to_numeric(cleaned, errors="coerce").fillna(0.0)
-
-
-def _normalize_month_label_simple(raw_label: str) -> Optional[str]:
-    """Normalise month label from either MM.YYYY or YYYY-MM format."""
-    text = str(raw_label).strip()
-    dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
-    if dot_match:
-        month, year = dot_match.groups()
-        return f"{year}-{month}"
-    dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
-    if dash_match:
-        return text
-    return None
-
 
 def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
     """Scan Production Volume reports and identify materials with missing master data.
@@ -2966,7 +2845,7 @@ def build_master_data_update_report(cfg: PipelineConfig) -> pd.DataFrame:
                     continue
                 if not passed:
                     continue
-                if _normalize_month_label_simple(str(col).strip()):
+                if _normalize_month_label(str(col).strip()):
                     month_cols.append(col)
 
         working = raw[[material_col]].copy()
@@ -3363,52 +3242,8 @@ def run_pipeline_staged(
 
 
 def run_pipeline(cfg: PipelineConfig) -> None:
-    cfg.processed_dir.mkdir(parents=True, exist_ok=True)
-    df_raw = read_workbook(cfg)
-    df_clean = clean_dataframe(df_raw, cfg)
-
-    append_history_snapshot(df_clean, cfg)
-
-    monthly_item = summarize_monthly_by_item(df_clean)
-    write_processed_csv(monthly_item, cfg.processed_dir, PROCESSED_FILES["monthly_item"])
-
-    monthly_requester = summarize_monthly_by_requester_item(df_clean)
-    write_processed_csv(
-        monthly_requester,
-        cfg.processed_dir,
-        PROCESSED_FILES["monthly_requester"],
-    )
-
-    mapping = read_level1_mapping(cfg)
-    monthly_level1 = summarize_monthly_by_first_level(df_clean, mapping, cfg)
-    write_processed_csv(monthly_level1, cfg.processed_dir, PROCESSED_FILES["monthly_level1"])
-
-    unmapped_report = build_level1_unmapped_report(df_clean, mapping, cfg)
-    write_processed_csv(unmapped_report, cfg.processed_dir, PROCESSED_FILES["level1_unmapped"])
-
-    pde_alerts = summarize_pde_alerts(df_clean)
-    write_processed_csv(pde_alerts, cfg.processed_dir, PROCESSED_FILES["pde_alerts"])
-
-    request_details = prepare_request_details(df_clean)
-    write_processed_csv(request_details, cfg.processed_dir, PROCESSED_FILES["request_details"])
-
-    hc_idp_monthly = summarize_hc_idp_monthly(cfg.data_base_dir)
-    write_processed_csv(hc_idp_monthly, cfg.processed_dir, PROCESSED_FILES["hc_idp_monthly"])
-
-    production_data = build_production_data_summary(cfg.production_data_dir, cfg)
-    write_processed_csv(production_data, cfg.processed_dir, PROCESSED_FILES["production_data"])
-
-    production_data_by_level = build_production_data_summary_by_level(cfg.production_data_dir, cfg)
-    write_processed_csv(production_data_by_level, cfg.processed_dir, PROCESSED_FILES["production_data_by_level"])
-
-    td_demand_by_dim = build_td_demand_by_dimension(cfg.data_base_dir, cfg)
-    write_processed_csv(td_demand_by_dim, cfg.processed_dir, PROCESSED_FILES["td_demand_by_dimension"])
-
-    td_validation = build_td_validation_monthly_comparison(cfg.data_base_dir)
-    write_processed_csv(td_validation, cfg.processed_dir, PROCESSED_FILES["td_validation_monthly_compare"])
-
-    td_validation_detail = build_td_validation_gap_details(cfg.data_base_dir, cfg)
-    write_processed_csv(td_validation_detail, cfg.processed_dir, PROCESSED_FILES["td_validation_gap_detail"])
+    """Legacy entry-point – delegates to ``run_pipeline_staged`` with all stages."""
+    run_pipeline_staged(cfg)
 
 
 def parse_args() -> argparse.Namespace:
