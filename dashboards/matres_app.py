@@ -4848,20 +4848,34 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
             logging.info("Restarting application via detached subprocess: %s", restart_cmd)
 
             if sys.platform == "win32":
-                # On Windows, os.execv() fails in CMD / VS Code terminals.
-                # Wrap in cmd /k so the window stays open if Python crashes,
-                # and the user can see any error messages.
-                py_args = " ".join(f'"{a}"' for a in restart_cmd)
-                wrapper_cmd = f'cmd /k "title MatRes Dashboard & {py_args}"'
+                # Write a temporary .bat file that starts the dashboard.
+                # Using a bat file avoids quoting issues with spaces in paths
+                # and cmd /k keeps the window open so errors are visible.
+                restart_bat = _PROJECT_ROOT / "data" / "processed" / "_restart.bat"
+                restart_bat.parent.mkdir(parents=True, exist_ok=True)
+                bat_lines = [
+                    "@echo off",
+                    "chcp 65001 >nul",
+                    "title MatRes Dashboard Server",
+                    f'cd /d "{_PROJECT_ROOT}"',
+                    f'echo [INFO] Starting dashboard from: {_PROJECT_ROOT}',
+                    f'echo [INFO] Python: {sys.executable}',
+                    f'"{sys.executable}" "{Path(sys.argv[0]).resolve()}"',
+                    "echo.",
+                    "echo [ERROR] Dashboard exited unexpectedly. See error above.",
+                    "pause",
+                ]
+                restart_bat.write_text("\r\n".join(bat_lines), encoding="utf-8")
+
                 CREATE_NEW_CONSOLE = 0x00000010
                 CREATE_NEW_PROCESS_GROUP = 0x00000200
                 subprocess.Popen(
-                    wrapper_cmd,
+                    [str(restart_bat)],
                     cwd=str(_PROJECT_ROOT),
                     creationflags=CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
                     close_fds=True,
                 )
-                logging.info("Detached child process spawned. Exiting parent in 1s ...")
+                logging.info("Restart bat launched. Exiting parent in 1s ...")
                 time.sleep(1)
                 os._exit(0)
             else:
