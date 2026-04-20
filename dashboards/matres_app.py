@@ -4839,65 +4839,20 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
         def _delayed_restart():
             import time
             time.sleep(3)
-            # Write a flag file so the app runs pipeline on startup
-            flag_file = _PROJECT_ROOT / "data" / "processed" / ".run_pipeline_on_start"
-            flag_file.parent.mkdir(parents=True, exist_ok=True)
-            flag_file.write_text("auto", encoding="utf-8")
 
-            logging.info("Preparing restart ...")
+            logging.info("Preparing restart via update_and_start_matres.bat ...")
 
             if sys.platform == "win32":
-                py_exe = str(Path(sys.executable).resolve())
-                app_script = str(Path(sys.argv[0]).resolve())
-                project_dir = str(_PROJECT_ROOT.resolve())
-                processed_dir = _PROJECT_ROOT / "data" / "processed"
-                processed_dir.mkdir(parents=True, exist_ok=True)
+                # Re-run the same bat file the user uses to start the server.
+                # It handles everything: git pull → venv → pip install → pipeline → dashboard.
+                # os.startfile is equivalent to double-clicking — always opens a visible CMD.
+                bat_path = _PROJECT_ROOT / "update_and_start_matres.bat"
+                if not bat_path.exists():
+                    logging.error("update_and_start_matres.bat not found: %s", bat_path)
+                    return
 
-                # Step A: write a .bat that starts the dashboard
-                restart_bat = processed_dir / "_restart.bat"
-                bat_lines = [
-                    "@echo off",
-                    "chcp 65001 >nul",
-                    "title MatRes Dashboard Server",
-                    f'cd /d "{project_dir}"',
-                    "echo ========================================",
-                    f'echo [INFO] Project: {project_dir}',
-                    f'echo [INFO] Python:  {py_exe}',
-                    f'echo [INFO] Script:  {app_script}',
-                    "echo ========================================",
-                    "echo.",
-                    "echo [INFO] Waiting 3 seconds for old process to exit ...",
-                    "timeout /t 3 /nobreak >nul",
-                    f'"{py_exe}" "{app_script}"',
-                    "echo.",
-                    "echo ========================================",
-                    "echo [ERROR] Dashboard exited. See error above.",
-                    "echo ========================================",
-                    "pause",
-                ]
-                restart_bat.write_text("\r\n".join(bat_lines), encoding="utf-8")
-
-                # Step B: write a .vbs that opens the bat in a visible window
-                # WScript.Shell.Run with windowStyle=1 is the most reliable
-                # way to launch a new visible CMD window on Windows.
-                restart_vbs = processed_dir / "_restart.vbs"
-                # Use chr(34) in VBS to avoid double-quote escaping issues
-                bat_path_str = str(restart_bat)
-                vbs_lines = [
-                    'Dim q : q = Chr(34)',
-                    'Set WshShell = CreateObject("WScript.Shell")',
-                    f'WshShell.Run "cmd /k " & q & "{bat_path_str}" & q, 1, False',
-                ]
-                restart_vbs.write_text("\r\n".join(vbs_lines), encoding="utf-8")
-
-                logging.info("Restart scripts written: %s, %s", restart_bat, restart_vbs)
-
-                # Launch via wscript — fully detached, new visible window
-                subprocess.Popen(
-                    ["wscript.exe", str(restart_vbs)],
-                    creationflags=0,
-                )
-                logging.info("Restart VBS launched. Exiting in 2s ...")
+                os.startfile(str(bat_path))
+                logging.info("update_and_start_matres.bat launched. Exiting current process ...")
                 time.sleep(2)
                 os._exit(0)
             else:
