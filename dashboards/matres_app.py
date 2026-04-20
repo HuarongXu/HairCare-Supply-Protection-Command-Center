@@ -4818,10 +4818,15 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
                     logging.error("update_and_start_matres.bat not found: %s", bat_path)
                     return
 
-                # os.startfile is equivalent to double-clicking the bat file.
-                # The bat itself will kill any old dashboard processes,
-                # then git pull, pip install, run pipeline, start dashboard.
-                os.startfile(str(bat_path.resolve()))
+                # Use "start" command to open a NEW independent CMD window.
+                # "start" with empty title "" and the bat path opens it correctly.
+                # This is more reliable than os.startfile which uses cmd /c
+                # and may close immediately on errors.
+                subprocess.Popen(
+                    f'start "" "{bat_path.resolve()}"',
+                    shell=True,
+                    cwd=str(_PROJECT_ROOT),
+                )
                 logging.info("Bat launched. Exiting current process in 3s ...")
                 time.sleep(3)
                 os._exit(0)

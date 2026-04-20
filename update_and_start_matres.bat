@@ -8,104 +8,72 @@ echo   MatRes Dashboard - One Click Start
 echo ========================================
 echo.
 
-REM ========== 0) 项目目录 (用 bat 文件所在目录) ==========
+REM -- Go to the folder where this bat file lives --
 cd /d "%~dp0"
-set "PROJECT_ROOT=%CD%"
-echo [INFO] Project Root: %PROJECT_ROOT%
+echo [INFO] Project Root: %CD%
 echo [INFO] Computer:     %COMPUTERNAME%
-echo [INFO] Time:         %DATE% %TIME%
 echo.
 
-REM ========== 1) 杀掉旧的 Dashboard 进程 ==========
-echo [INFO] Checking for existing dashboard processes ...
-for /f "tokens=2" %%P in ('tasklist /fi "WINDOWTITLE eq MatRes Dashboard Server" /fo list 2^>nul ^| findstr /i "PID:"') do (
-  echo [INFO] Killing old dashboard PID: %%P
-  taskkill /PID %%P /F >nul 2>nul
-)
-REM Also kill any python running matres_app.py
-for /f "tokens=2 delims=," %%P in ('wmic process where "CommandLine like '%%matres_app%%' and name='python.exe'" get ProcessId /format:csv 2^>nul ^| findstr /r "[0-9]"') do (
-  echo [INFO] Killing old matres_app.py PID: %%P
-  taskkill /PID %%P /F >nul 2>nul
-)
-REM Wait for port 8050 to be released
+REM -- Kill old dashboard if running --
+echo [INFO] Stopping old dashboard (if any) ...
+taskkill /f /fi "WINDOWTITLE eq MatRes Dashboard Server" >nul 2>nul
+taskkill /f /fi "WINDOWTITLE eq MatRes One-Click Update + Start" /fi "PID ne %PID%" >nul 2>nul
 timeout /t 3 /nobreak >nul
+echo [OK] Ready.
+echo.
 
-REM ========== 2) 检查 Git ==========
+REM -- Check Git --
 where git >nul 2>nul
 if errorlevel 1 (
-  echo [ERROR] Git is not installed or not in PATH.
-  echo [HINT] Install Git for Windows first.
-  goto :FAIL
+  echo [ERROR] Git not found. Install Git for Windows.
+  goto :DONE
 )
 
-REM ========== 3) 初始化/修复 Git 仓库 ==========
+REM -- Init/repair git repo if needed --
 if not exist ".git" (
-  echo [WARN] Not a Git repo. Initializing ...
+  echo [WARN] Not a git repo, initializing ...
   git init
 )
 git status >nul 2>nul
 if errorlevel 1 (
-  echo [WARN] .git corrupted (OneDrive sync?). Rebuilding ...
+  echo [WARN] .git corrupted, rebuilding ...
   rmdir /s /q ".git" 2>nul
   git init
-  echo [OK] .git rebuilt.
 )
 
-REM ========== 4) 绑定远程仓库 ==========
+REM -- Setup remote --
 git remote get-url origin >nul 2>nul
 if errorlevel 1 (
-  echo [INFO] Adding remote origin ...
   git remote add origin https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git
-) else (
-  for /f "delims=" %%R in ('git remote get-url origin') do set "REMOTE_URL=%%R"
-  if /I not "!REMOTE_URL!"=="https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git" (
-    echo [WARN] Fixing origin URL ...
-    git remote set-url origin https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git
-  )
 )
 
-REM ========== 5) 拉取最新代码 ==========
-echo.
-echo [INFO] Fetching latest code from GitHub ...
-git fetch origin --prune
+REM -- Pull latest code --
+echo [INFO] Pulling latest code from GitHub ...
+git fetch origin --prune 2>nul
 if errorlevel 1 (
-  echo [WARN] git fetch failed, repairing .git/index ...
+  echo [WARN] fetch failed, repairing index ...
   if exist ".git\index" del /f /q ".git\index"
   git reset >nul 2>nul
   git fetch origin --prune
   if errorlevel 1 (
-    echo [ERROR] git fetch still failed. Close any programs using project files and retry.
-    goto :FAIL
+    echo [ERROR] Cannot fetch from GitHub.
+    goto :DONE
   )
-  echo [OK] .git/index repaired.
 )
 
-echo [INFO] Switching to main branch ...
 git checkout -B main origin/main >nul 2>nul
 if errorlevel 1 (
-  echo [WARN] Checkout blocked by untracked files. Cleaning ...
   if exist "config" robocopy "config" "_backup_config_auto" /E >nul
-  git clean -fd -e .venv -e .venv_* -e data -e config -e _backup_config_auto
-  git checkout -B main origin/main
-  if errorlevel 1 (
-    echo [ERROR] Cannot switch to main. Check conflicting files manually.
-    goto :FAIL
-  )
+  git clean -fd -e .venv -e .venv_* -e data -e config -e _backup_config_auto >nul 2>nul
+  git checkout -B main origin/main >nul 2>nul
 )
 
-git reset --hard origin/main
-if errorlevel 1 (
-  echo [ERROR] git reset failed.
-  goto :FAIL
-)
-
-for /f "delims=" %%C in ('git log -1 --oneline') do set "LAST_COMMIT=%%C"
-echo [OK] Current commit: !LAST_COMMIT!
-
-REM ========== 6) 找到 Python ==========
+git reset --hard origin/main >nul 2>nul
+for /f "delims=" %%C in ('git log -1 --oneline 2^>nul') do echo [OK] Commit: %%C
 echo.
-set "PY_CMD="
 
+REM -- Find Python --
+set "PY_CMD="
 where python >nul 2>nul
 if not errorlevel 1 (
   python --version >nul 2>nul
@@ -128,80 +96,67 @@ if not defined PY_CMD (
   )
 )
 if not defined PY_CMD (
-  echo [ERROR] Python not found. Install Python 3.10+ and add to PATH.
-  goto :FAIL
+  echo [ERROR] Python not found. Install Python 3.10+
+  goto :DONE
 )
+echo [INFO] Python: %PY_CMD%
 
-echo [INFO] Using Python: %PY_CMD%
-%PY_CMD% --version
-
-REM ========== 7) 虚拟环境 (每台电脑独立) ==========
+REM -- Setup venv --
 set "VENV_DIR=.venv_%COMPUTERNAME%"
-echo [INFO] Venv: %VENV_DIR%
-
-REM Validate existing venv
 if exist "%VENV_DIR%\Scripts\python.exe" (
   "%VENV_DIR%\Scripts\python.exe" --version >nul 2>nul
   if errorlevel 1 (
-    echo [WARN] Existing venv is broken. Recreating ...
-    rmdir /s /q "%VENV_DIR%"
+    echo [WARN] Venv broken, recreating ...
+    rmdir /s /q "%VENV_DIR%" 2>nul
   )
 )
-
 if not exist "%VENV_DIR%\Scripts\python.exe" (
-  echo [INFO] Creating venv ...
+  echo [INFO] Creating venv: %VENV_DIR% ...
   %PY_CMD% -m venv "%VENV_DIR%"
   if errorlevel 1 (
     echo [ERROR] Failed to create venv.
-    goto :FAIL
+    goto :DONE
   )
 )
-
 call "%VENV_DIR%\Scripts\activate.bat"
-if errorlevel 1 (
-  echo [ERROR] Failed to activate venv.
-  goto :FAIL
-)
+echo [INFO] Venv activated: %VENV_DIR%
 
-echo [INFO] Installing / updating dependencies ...
-python -m pip install --upgrade pip --quiet
-pip install -r requirements.txt --quiet
+REM -- Install dependencies --
+echo [INFO] Installing dependencies ...
+python -m pip install --upgrade pip --quiet 2>nul
+pip install -r requirements.txt --quiet 2>nul
 if errorlevel 1 (
-  echo [ERROR] pip install failed.
-  goto :FAIL
+  echo [WARN] Some dependencies may have failed.
 )
 echo [OK] Dependencies ready.
-
-REM ========== 8) 刷新数据 (Pipeline) ==========
 echo.
+
+REM -- Run pipeline --
 echo [INFO] Running data pipeline ...
 python .\scripts\matres_pipeline.py
 if errorlevel 1 (
-  echo [WARN] Pipeline had errors (see above). Dashboard will start anyway.
-  echo.
+  echo [WARN] Pipeline had errors, continuing anyway ...
 )
 echo [OK] Pipeline finished.
-
-REM ========== 9) 启动 Dashboard ==========
 echo.
+
+REM -- Start dashboard --
 echo ========================================
 echo   Starting Dashboard ...
 echo   URL: http://localhost:8050
 echo   Press Ctrl+C to stop
 echo ========================================
 echo.
-
 title MatRes Dashboard Server
 python .\dashboards\matres_app.py
 
 echo.
-echo ========================================
-echo   Dashboard has stopped.
-echo ========================================
-goto :FAIL
+echo [INFO] Dashboard has exited.
 
-:FAIL
+:DONE
 echo.
-echo Press any key to close this window ...
+echo ========================================
+echo   Press any key to close ...
+echo ========================================
 pause >nul
 endlocal
