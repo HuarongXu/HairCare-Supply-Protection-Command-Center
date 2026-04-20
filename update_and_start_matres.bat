@@ -111,8 +111,10 @@ if not defined PY_CMD (
 echo [INFO] Using Python: %PY_CMD%
 %PY_CMD% --version
 
+REM Each machine gets its own venv so two computers sharing
+REM the same OneDrive folder won't conflict with each other.
 set "VENV_DIR=.venv_%COMPUTERNAME%"
-if exist ".venv\Scripts\python.exe" set "VENV_DIR=.venv"
+echo [INFO] Machine-specific venv: %VENV_DIR%
 
 REM Validate existing venv (may be broken after cross-machine copy)
 if exist "%VENV_DIR%\Scripts\python.exe" (
