@@ -4797,66 +4797,35 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
 
         messages: List[str] = []
 
-        # Step 1: git pull
-        try:
-            pull_result = subprocess.run(
-                ["git", "pull", "origin", "main"],
-                cwd=str(_PROJECT_ROOT),
-                capture_output=True, text=True, timeout=60,
-            )
-            pull_output = (pull_result.stdout or "").strip()
-            messages.append(f"[git pull] {pull_output}")
-            if pull_result.returncode != 0:
-                err = (pull_result.stderr or "").strip()
-                messages.append(f"[git pull ERROR] {err}")
-                return "\n".join(messages), False
-        except Exception as exc:
-            messages.append(f"[git pull EXCEPTION] {exc}")
-            return "\n".join(messages), False
-
-        # Step 2: pip install
-        try:
-            req_file = _PROJECT_ROOT / "requirements.txt"
-            if req_file.exists():
-                pip_result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "-r", str(req_file), "--quiet"],
-                    cwd=str(_PROJECT_ROOT),
-                    capture_output=True, text=True, timeout=120,
-                )
-                messages.append(f"[pip install] return code {pip_result.returncode}")
-                if pip_result.returncode != 0:
-                    err = (pip_result.stderr or "").strip()
-                    messages.append(f"[pip ERROR] {err}")
-        except Exception as exc:
-            messages.append(f"[pip EXCEPTION] {exc}")
-
-        # Step 3: Schedule restart + auto-run pipeline
-        messages.append("[restart] Restarting application in 3 seconds ...")
-        messages.append("Please refresh this page in ~15 seconds.")
+        # Since update_and_start_matres.bat handles EVERYTHING
+        # (git pull → venv → pip → pipeline → start dashboard),
+        # we just need to launch it and exit.
+        messages.append("[restart] Launching update_and_start_matres.bat ...")
+        messages.append("A new CMD window will open. This page will stop responding.")
+        messages.append("Please wait ~2 minutes, then visit http://localhost:8050")
 
         import threading
 
         def _delayed_restart():
             import time
-            time.sleep(3)
+            time.sleep(2)
 
-            logging.info("Preparing restart via update_and_start_matres.bat ...")
+            bat_path = _PROJECT_ROOT / "update_and_start_matres.bat"
+            logging.info("Restart: launching %s", bat_path)
 
             if sys.platform == "win32":
-                # Re-run the same bat file the user uses to start the server.
-                # It handles everything: git pull → venv → pip install → pipeline → dashboard.
-                # os.startfile is equivalent to double-clicking — always opens a visible CMD.
-                bat_path = _PROJECT_ROOT / "update_and_start_matres.bat"
                 if not bat_path.exists():
                     logging.error("update_and_start_matres.bat not found: %s", bat_path)
                     return
 
-                os.startfile(str(bat_path))
-                logging.info("update_and_start_matres.bat launched. Exiting current process ...")
-                time.sleep(2)
+                # os.startfile is equivalent to double-clicking the bat file.
+                # The bat itself will kill any old dashboard processes,
+                # then git pull, pip install, run pipeline, start dashboard.
+                os.startfile(str(bat_path.resolve()))
+                logging.info("Bat launched. Exiting current process in 3s ...")
+                time.sleep(3)
                 os._exit(0)
             else:
-                # On Unix, execv works reliably
                 restart_cmd = [sys.executable] + sys.argv
                 os.execv(sys.executable, restart_cmd)
 
