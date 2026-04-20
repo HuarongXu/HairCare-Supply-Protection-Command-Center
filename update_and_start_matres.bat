@@ -24,6 +24,15 @@ if not exist ".git" (
   git init
 )
 
+REM Validate .git integrity (OneDrive may corrupt objects)
+git status >nul 2>nul
+if errorlevel 1 (
+  echo [WARN] .git 仓库已损坏 (可能被 OneDrive 同步破坏)，正在重建...
+  rmdir /s /q ".git" 2>nul
+  git init
+  echo [OK] .git 已重建。
+)
+
 REM ========== 3) 绑定远程 ==========
 git remote get-url origin >nul 2>nul
 if errorlevel 1 (
