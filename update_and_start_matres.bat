@@ -41,9 +41,16 @@ REM ========== 4) 拉取并切到 main ==========
 echo [INFO] Fetch latest...
 git fetch origin --prune
 if errorlevel 1 (
-  echo [ERROR] git fetch 失败。
-  pause
-  exit /b 1
+  echo [WARN] git fetch 失败，尝试修复 .git/index ...
+  if exist ".git\index" del /f /q ".git\index"
+  git reset >nul 2>nul
+  git fetch origin --prune
+  if errorlevel 1 (
+    echo [ERROR] git fetch 仍然失败，请关闭所有占用文件的程序后重试。
+    pause
+    exit /b 1
+  )
+  echo [OK] .git/index 已修复。
 )
 
 echo [INFO] Checkout main...
