@@ -30,6 +30,22 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _PIPELINE_SCRIPT = _PROJECT_ROOT / "scripts" / "matres_pipeline.py"
 _PIPELINE_PROGRESS_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_progress.json"
 _DATA_VERSION_FILE = _PROJECT_ROOT / "data" / "processed" / ".data_version"
+_PIPELINE_LOG_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_output.log"
+
+
+def _get_git_version() -> str:
+    """Return short git commit hash + date for display."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%h (%ci)"],
+            cwd=str(_PROJECT_ROOT),
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
 
 
 def _read_data_version() -> str:
@@ -270,16 +286,19 @@ def _start_pipeline_subprocess(group: str) -> None:
 
     *group* is one of the REFRESH_GROUPS keys (``all``, ``demand``, etc.).
     Progress is written to ``_PIPELINE_PROGRESS_FILE`` by the pipeline.
+    Output is redirected to ``pipeline_output.log`` for debugging.
     """
     cmd = [sys.executable, str(_PIPELINE_SCRIPT), "--progress-file", str(_PIPELINE_PROGRESS_FILE)]
     if group and group != "all":
         cmd += ["--stages", group]
     logging.info("Starting pipeline subprocess: %s", " ".join(cmd))
+    _PIPELINE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = open(_PIPELINE_LOG_FILE, "w", encoding="utf-8")  # noqa: SIM115
     subprocess.Popen(
         cmd,
         cwd=str(_PROJECT_ROOT),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_fh,
+        stderr=log_fh,
     )
 
 
@@ -3818,7 +3837,13 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="admin-header",
                         children=[
-                            html.H1("Admin Panel", style={"margin": "0", "color": "#1e3a8a"}),
+                            html.Div([
+                                html.H1("Admin Panel", style={"margin": "0", "color": "#1e3a8a"}),
+                                html.Span(
+                                    f"Git: {_get_git_version()}",
+                                    style={"fontSize": "12px", "color": "#6b7280", "marginTop": "4px", "display": "block"},
+                                ),
+                            ]),
                             html.A(
                                 html.Button("Back to Dashboard", className="admin-btn"),
                                 href="/",
@@ -4824,17 +4849,15 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
 
             if sys.platform == "win32":
                 # On Windows, os.execv() fails in CMD / VS Code terminals.
-                # Spawn a fully detached child process, then exit the parent.
-                DETACHED_PROCESS = 0x00000008
+                # Spawn a child process in a NEW visible console so the user
+                # can see Dash server output on the server machine.
+                CREATE_NEW_CONSOLE = 0x00000010
                 CREATE_NEW_PROCESS_GROUP = 0x00000200
                 subprocess.Popen(
                     restart_cmd,
                     cwd=str(_PROJECT_ROOT),
-                    creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+                    creationflags=CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
                     close_fds=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    stdin=subprocess.DEVNULL,
                 )
                 logging.info("Detached child process spawned. Exiting parent in 1s ...")
                 time.sleep(1)
@@ -5116,6 +5139,26 @@ def create_app() -> Dash:
             flag_file.unlink()
             logging.info("Auto-running pipeline after restart ...")
             _start_pipeline_subprocess("all")
+
+            # Monitor pipeline completion in the background and trigger
+            # a data-version write so all connected dashboards auto-refresh.
+            import threading as _threading
+
+            def _wait_and_notify():
+                import time as _time
+                for _ in range(600):  # up to ~10 minutes
+                    _time.sleep(1)
+                    progress = _read_pipeline_progress()
+                    if progress and progress.get("status") in ("completed", "error"):
+                        if progress["status"] == "completed":
+                            logging.info("Auto-pipeline completed. Writing data version to trigger refresh.")
+                            _write_data_version()
+                        else:
+                            logging.warning("Auto-pipeline finished with error: %s", progress.get("error_message"))
+                        return
+                logging.warning("Auto-pipeline monitor timed out after 600s.")
+
+            _threading.Thread(target=_wait_and_notify, daemon=True).start()
         except Exception:
             logging.exception("Failed to auto-run pipeline on start")
 
