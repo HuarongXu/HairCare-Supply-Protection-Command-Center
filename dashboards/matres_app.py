@@ -4849,12 +4849,14 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
 
             if sys.platform == "win32":
                 # On Windows, os.execv() fails in CMD / VS Code terminals.
-                # Spawn a child process in a NEW visible console so the user
-                # can see Dash server output on the server machine.
+                # Wrap in cmd /k so the window stays open if Python crashes,
+                # and the user can see any error messages.
+                py_args = " ".join(f'"{a}"' for a in restart_cmd)
+                wrapper_cmd = f'cmd /k "title MatRes Dashboard & {py_args}"'
                 CREATE_NEW_CONSOLE = 0x00000010
                 CREATE_NEW_PROCESS_GROUP = 0x00000200
                 subprocess.Popen(
-                    restart_cmd,
+                    wrapper_cmd,
                     cwd=str(_PROJECT_ROOT),
                     creationflags=CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
                     close_fds=True,
