@@ -21,12 +21,13 @@ from flask import Response, abort, request
 import pandas as pd
 import plotly.graph_objects as go
 
-CONFIG_PATH = Path(os.getenv("MATRES_CONFIG", "config/config.json"))
-
 # ---------------------------------------------------------------------------
 # Pipeline integration paths
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_PATH = Path(os.getenv("MATRES_CONFIG", str(_PROJECT_ROOT / "config" / "config.json")))
+if not CONFIG_PATH.is_absolute():
+    CONFIG_PATH = (_PROJECT_ROOT / CONFIG_PATH).resolve()
 _PIPELINE_SCRIPT = _PROJECT_ROOT / "scripts" / "matres_pipeline.py"
 _PIPELINE_PROGRESS_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_progress.json"
 _DATA_VERSION_FILE = _PROJECT_ROOT / "data" / "processed" / ".data_version"
@@ -75,11 +76,11 @@ class AppConfig:
         raw = json.loads(path.read_text(encoding="utf-8"))
         processed_dir = Path(raw["processed_dir"])
         if not processed_dir.is_absolute():
-            processed_dir = path.parent.parent / processed_dir
+            processed_dir = (path.parent.parent / processed_dir).resolve()
 
         data_base_dir = Path(raw.get("data_base_dir", path.parent.parent))
         if not data_base_dir.is_absolute():
-            data_base_dir = path.parent.parent / data_base_dir
+            data_base_dir = (path.parent.parent / data_base_dir).resolve()
 
         admin_password = raw.get("admin_password", "HR")
 
@@ -1994,6 +1995,7 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = cfg.processed_dir.parent / "history" / "dashboard_snapshots" / f"snapshot_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
+    logging.info("Snapshot output directory: %s (exists=%s)", out_dir, out_dir.exists())
 
     excel_path = out_dir / f"dashboard_snapshot_{timestamp}.xlsx"
     page_prefix = {
@@ -4613,11 +4615,11 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
 
         try:
             snapshot_dir, excel_file, exported_count = create_dashboard_snapshot(cfg)
-            status_text = f"Backup completed: {snapshot_dir.name} ({exported_count} tables)"
-            return dcc.send_file(str(excel_file)), status_text
-        except Exception:
+            status_text = f"Backup completed: {exported_count} tables saved to {snapshot_dir}"
+            return dash.no_update, status_text
+        except Exception as exc:
             logging.exception("Failed to create dashboard snapshot")
-            return dash.no_update, "Backup failed, please check server logs."
+            return dash.no_update, f"Backup failed: {exc}"
 
 
 def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
@@ -4779,10 +4781,11 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
             raise PreventUpdate
         try:
             snapshot_dir, excel_file, exported_count = create_dashboard_snapshot(cfg)
-            return dcc.send_file(str(excel_file)), f"Backup completed: {snapshot_dir.name} ({exported_count} tables)"
-        except Exception:
+            logging.info("Backup snapshot saved: %s (%d tables)", snapshot_dir, exported_count)
+            return dash.no_update, f"✓ Backup completed: {exported_count} tables saved to {snapshot_dir}"
+        except Exception as exc:
             logging.exception("Failed to create dashboard snapshot")
-            return dash.no_update, "Backup failed, check server logs."
+            return dash.no_update, f"✗ Backup failed: {exc}"
 
     # ── Update & Restart ──────────────────────────────────────────
     @app.callback(
