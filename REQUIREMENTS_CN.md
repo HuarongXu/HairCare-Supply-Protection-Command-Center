@@ -282,13 +282,15 @@ CLI 用法：
   - Role 趋势图、Role-Item 汇总矩阵、Monthly Summary、Past Due Alerts。
 - `Project Details`
   - `Role × Item × Project` 汇总。
-  - 支持可搜索多选筛选：`Requester Email` 与 `MRP Element Indicator`。
+  - 支持可搜索多选筛选：`Requester Email`、`MRP Element Indicator` 与 `Item Text`。
+  - Total 行独立显示在汇总表下方，不受排序影响，始终固定在底部。
   - 支持明细下钻与明细导出。
 - `Demand Data`
   - `TD Version Monthly Comparison` 主表。
   - 点击 GAP 行后可查看 `Level2 GAP Details` 与 `GAP Difference Details`。
   - 两类明细都支持导出。
-- `Production Data` — 分为两个子标签页：
+  - **单元格计算器**：Ctrl+点击多个单元格可实时查看数值求和（右下角浮动小工具）。
+- `Production Data` — 分为两个子标签页（位于 Demand Assumption 之后）：
   - **Summary** 子标签页：
     - `By Plant` 与 `By Plant / Level1 / Level2` 两张表。
     - 当月拆分为 `MTD`、`Left Production`、`Current Month`。
@@ -299,6 +301,7 @@ CLI 用法：
     - 6 个筛选下拉框（Brand、Size、Variant、Plant、Lineup、Prod Line），支持多选。
     - 展示 MTD、Left Production、Current Month Total 及未来月份列（当月列不显示）。
     - 底部附加 Total 汇总行。
+  - **单元格计算器**：Ctrl+点击多个单元格可实时查看数值求和（右下角浮动小工具）。
 
 ## 12）板子逻辑 HTML 说明文档
 - 已提供可交接的 HTML 文档：

@@ -21,70 +21,26 @@ from flask import Response, abort, request
 import pandas as pd
 import plotly.graph_objects as go
 
-# ---------------------------------------------------------------------------
-# Pipeline integration paths
-# ---------------------------------------------------------------------------
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = Path(os.getenv("MATRES_CONFIG", str(_PROJECT_ROOT / "config" / "config.json")))
-if not CONFIG_PATH.is_absolute():
-    CONFIG_PATH = (_PROJECT_ROOT / CONFIG_PATH).resolve()
-_PIPELINE_SCRIPT = _PROJECT_ROOT / "scripts" / "matres_pipeline.py"
-_PIPELINE_PROGRESS_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_progress.json"
-_DATA_VERSION_FILE = _PROJECT_ROOT / "data" / "processed" / ".data_version"
-_PIPELINE_LOG_FILE = _PROJECT_ROOT / "data" / "processed" / "pipeline_output.log"
-
-
-def _get_git_version() -> str:
-    """Return short git commit hash + date for display."""
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%h (%ci)"],
-            cwd=str(_PROJECT_ROOT),
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except Exception:
-        pass
-    return "unknown"
-
-
-def _read_data_version() -> str:
-    """Read the server-side data version (timestamp string)."""
-    try:
-        return _DATA_VERSION_FILE.read_text(encoding="utf-8").strip()
-    except Exception:
-        return ""
-
-
-def _write_data_version() -> str:
-    """Write a new data version timestamp. Returns the version string."""
-    ts = datetime.now().isoformat()
-    _DATA_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _DATA_VERSION_FILE.write_text(ts, encoding="utf-8")
-    return ts
+CONFIG_PATH = Path(os.getenv("MATRES_CONFIG", "config/config.json"))
 
 
 @dataclass
 class AppConfig:
     processed_dir: Path
     data_base_dir: Path
-    admin_password: str = "HR"
 
     @staticmethod
     def load(path: Path) -> "AppConfig":
         raw = json.loads(path.read_text(encoding="utf-8"))
         processed_dir = Path(raw["processed_dir"])
         if not processed_dir.is_absolute():
-            processed_dir = (path.parent.parent / processed_dir).resolve()
+            processed_dir = path.parent.parent / processed_dir
 
         data_base_dir = Path(raw.get("data_base_dir", path.parent.parent))
         if not data_base_dir.is_absolute():
-            data_base_dir = (path.parent.parent / data_base_dir).resolve()
+            data_base_dir = path.parent.parent / data_base_dir
 
-        admin_password = raw.get("admin_password", "HR")
-
-        return AppConfig(processed_dir=processed_dir, data_base_dir=data_base_dir, admin_password=admin_password)
+        return AppConfig(processed_dir=processed_dir, data_base_dir=data_base_dir)
 
 
 def load_dataset(processed_dir: Path, filename: str) -> pd.DataFrame:
@@ -126,17 +82,7 @@ def load_historical_shipment_dataset(cfg: AppConfig) -> pd.DataFrame:
     if not unique_candidates:
         return pd.DataFrame()
 
-    accessible_candidates: List[Tuple[float, Path]] = []
-    for candidate in unique_candidates:
-        try:
-            accessible_candidates.append((candidate.stat().st_mtime, candidate))
-        except (PermissionError, OSError):
-            logging.warning("Skipping inaccessible historical shipment file: %s", candidate)
-
-    if not accessible_candidates:
-        return pd.DataFrame()
-
-    file_path = max(accessible_candidates, key=lambda item: item[0])[1]
+    file_path = max(unique_candidates, key=lambda p: p.stat().st_mtime)
     try:
         raw = pd.read_excel(file_path, sheet_name="Sheet1", header=None)
     except Exception:
@@ -184,133 +130,33 @@ def load_historical_shipment_dataset(cfg: AppConfig) -> pd.DataFrame:
     return hist
 
 
-# ---------------------------------------------------------------------------
-# Refresh group definitions – each group maps to the data keys it covers.
-# "all" reloads everything (same as the old full refresh).
-# ---------------------------------------------------------------------------
-REFRESH_GROUPS: Dict[str, Dict[str, str]] = {
-    "all": {
-        "label": "All Data",
-        "description": "Reload everything",
-    },
-    "demand": {
-        "label": "Demand (HC IDP)",
-        "description": "hc_idp_monthly + historical_shipment",
-    },
-    "supply": {
-        "label": "Supply Protection (MR)",
-        "description": "monthly_item / requester / level1 / pde / details",
-    },
-    "td": {
-        "label": "TD Validation",
-        "description": "td_validation + td_validation_detail",
-    },
-    "production": {
-        "label": "Production Data",
-        "description": "production_data + production_data_by_level",
-    },
-}
-
-# Which data‐bundle keys belong to which refresh group
-_REFRESH_GROUP_KEYS: Dict[str, List[str]] = {
-    "demand": ["hc_idp_monthly", "historical_shipment"],
-    "supply": [
-        "monthly_item",
-        "monthly_requester",
-        "monthly_level1",
-        "pde_alerts",
-    ],
-    "td": ["td_validation", "td_validation_detail"],
-    "production": ["production_data", "production_data_by_level", "td_demand_by_dimension"],
-}
-
-
-def _load_single_key(cfg: AppConfig, key: str) -> Any:
-    """Load a single data-bundle key from disk and return list-of-dicts."""
-    loaders: Dict[str, Any] = {
-        "monthly_item": lambda: load_dataset(cfg.processed_dir, "monthly_msu_by_item_text.csv"),
-        "monthly_requester": lambda: load_dataset(cfg.processed_dir, "monthly_msu_by_requester_item.csv"),
-        "monthly_level1": lambda: load_dataset(cfg.processed_dir, "monthly_msu_by_level1.csv"),
-        "hc_idp_monthly": lambda: load_dataset(cfg.processed_dir, "hc_idp_monthly_summary.csv"),
-        "production_data": lambda: load_dataset(cfg.processed_dir, "production_data_summary.csv"),
-        "production_data_by_level": lambda: load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv"),
-        "td_demand_by_dimension": lambda: load_dataset(cfg.processed_dir, "td_demand_by_dimension.csv"),
-        "td_validation": lambda: load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv"),
-        "td_validation_detail": lambda: load_dataset(cfg.processed_dir, "td_version_gap_details.csv"),
-        "historical_shipment": lambda: load_historical_shipment_dataset(cfg),
-        "pde_alerts": lambda: load_dataset(cfg.processed_dir, "pde_alerts.csv"),
-    }
-    loader = loaders.get(key)
-    if loader is None:
-        return []
-    return loader().to_dict("records")
-
-
 def load_data_bundle(cfg: AppConfig) -> Dict[str, Any]:
-    bundle: Dict[str, Any] = {}
-    for group_keys in _REFRESH_GROUP_KEYS.values():
-        for key in group_keys:
-            bundle[key] = _load_single_key(cfg, key)
-
+    monthly_item = load_dataset(cfg.processed_dir, "monthly_msu_by_item_text.csv")
+    monthly_requester = load_dataset(cfg.processed_dir, "monthly_msu_by_requester_item.csv")
+    monthly_level1 = load_dataset(cfg.processed_dir, "monthly_msu_by_level1.csv")
+    hc_idp_monthly = load_dataset(cfg.processed_dir, "hc_idp_monthly_summary.csv")
+    production_data = load_dataset(cfg.processed_dir, "production_data_summary.csv")
+    production_data_by_level = load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv")
+    td_validation = load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv")
+    td_validation_detail = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
+    historical_shipment = load_historical_shipment_dataset(cfg)
+    pde_alerts = load_dataset(cfg.processed_dir, "pde_alerts.csv")
     request_details_path = cfg.processed_dir / "matres_request_details.csv"
-    bundle["request_details_version"] = (
-        request_details_path.stat().st_mtime if request_details_path.exists() else None
-    )
-    return bundle
+    details_version = request_details_path.stat().st_mtime if request_details_path.exists() else None
 
-
-def load_data_bundle_partial(
-    cfg: AppConfig, existing: Dict[str, Any], group: str
-) -> Dict[str, Any]:
-    """Merge only the keys belonging to *group* into *existing*, return new bundle."""
-    if group == "all" or group not in _REFRESH_GROUP_KEYS:
-        return load_data_bundle(cfg)
-
-    merged = dict(existing)
-    for key in _REFRESH_GROUP_KEYS[group]:
-        merged[key] = _load_single_key(cfg, key)
-
-    # Always refresh request_details_version
-    request_details_path = cfg.processed_dir / "matres_request_details.csv"
-    merged["request_details_version"] = (
-        request_details_path.stat().st_mtime if request_details_path.exists() else None
-    )
-    return merged
-
-
-# ---------------------------------------------------------------------------
-# Pipeline subprocess helpers
-# ---------------------------------------------------------------------------
-
-def _start_pipeline_subprocess(group: str) -> None:
-    """Launch matres_pipeline.py in a detached subprocess.
-
-    *group* is one of the REFRESH_GROUPS keys (``all``, ``demand``, etc.).
-    Progress is written to ``_PIPELINE_PROGRESS_FILE`` by the pipeline.
-    Output is redirected to ``pipeline_output.log`` for debugging.
-    """
-    cmd = [sys.executable, str(_PIPELINE_SCRIPT), "--progress-file", str(_PIPELINE_PROGRESS_FILE)]
-    if group and group != "all":
-        cmd += ["--stages", group]
-    logging.info("Starting pipeline subprocess: %s", " ".join(cmd))
-    _PIPELINE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    log_fh = open(_PIPELINE_LOG_FILE, "w", encoding="utf-8")  # noqa: SIM115
-    subprocess.Popen(
-        cmd,
-        cwd=str(_PROJECT_ROOT),
-        stdout=log_fh,
-        stderr=log_fh,
-    )
-
-
-def _read_pipeline_progress() -> Optional[Dict[str, Any]]:
-    """Read current pipeline progress from the JSON file."""
-    try:
-        if _PIPELINE_PROGRESS_FILE.exists():
-            return json.loads(_PIPELINE_PROGRESS_FILE.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        pass
-    return None
+    return {
+        "monthly_item": monthly_item.to_dict("records"),
+        "monthly_requester": monthly_requester.to_dict("records"),
+        "monthly_level1": monthly_level1.to_dict("records"),
+        "hc_idp_monthly": hc_idp_monthly.to_dict("records"),
+        "production_data": production_data.to_dict("records"),
+        "production_data_by_level": production_data_by_level.to_dict("records"),
+        "td_validation": td_validation.to_dict("records"),
+        "td_validation_detail": td_validation_detail.to_dict("records"),
+        "historical_shipment": historical_shipment.to_dict("records"),
+        "pde_alerts": pde_alerts.to_dict("records"),
+        "request_details_version": details_version,
+    }
 
 
 REQUEST_DETAILS_CACHE: Dict[str, Any] = {"mtime": None, "data": pd.DataFrame()}
@@ -923,13 +769,6 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
     columns.append({"name": TOTAL_LABEL, "id": TOTAL_LABEL})
 
     records: List[Dict] = []
-
-    def fmt(value: Any) -> str:
-        numeric = pd.to_numeric(value, errors="coerce")
-        if pd.isna(numeric) or float(numeric) == 0.0:
-            return "-"
-        return f"{float(numeric):,.1f}"
-
     for requester, row in pivot.iterrows():
         record = {
             "Requester Email": requester,
@@ -937,108 +776,15 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
         }
         for label in date_labels + [TOTAL_LABEL]:
             value = row.get(label, 0)
-            record[label] = fmt(value)
+            record[label] = f"{value:,.1f}" if pd.notna(value) else "-"
         records.append(record)
 
     return columns, records
 
 
-def summarize_pde_alerts_from_details(df: pd.DataFrame, fg_only: bool) -> pd.DataFrame:
-    output_columns = [
-        "Requester Email",
-        "availability_date",
-        "availability_month",
-        "msu_due",
-        "open_items",
-        "max_pde",
-        "avg_pde",
-        "closest_availability",
-        "project_label",
-        "requester_role",
-    ]
-    required_columns = ["PDE Checking", "Availability Date", "MSU", "Requester Email", "Item Text"]
-    if df.empty or any(col not in df.columns for col in required_columns):
-        return pd.DataFrame(columns=output_columns)
-
-    working = df.copy()
-    working["Item Text"] = working["Item Text"].fillna("").astype(str).str.strip()
-    item_text_key = working["Item Text"].str.lower()
-    if fg_only:
-        working = working[item_text_key == "fg rolling"].copy()
-    else:
-        working = working[item_text_key != "fg rolling"].copy()
-
-    if working.empty:
-        return pd.DataFrame(columns=output_columns)
-
-    working["PDE Checking"] = pd.to_numeric(working["PDE Checking"], errors="coerce")
-    working = working[working["PDE Checking"].notna()].copy()
-    if working.empty:
-        return pd.DataFrame(columns=output_columns)
-
-    working["Availability Date"] = pd.to_datetime(working["Availability Date"], errors="coerce")
-    working = working[working["Availability Date"].notna()].copy()
-    if working.empty:
-        return pd.DataFrame(columns=output_columns)
-
-    working["MSU"] = pd.to_numeric(working.get("MSU", 0), errors="coerce").fillna(0.0)
-    if "MRP Element Indicator" not in working.columns:
-        working["MRP Element Indicator"] = ""
-    if "requester_role" not in working.columns:
-        working["requester_role"] = UNKNOWN_ROLE
-    working["requester_role"] = working["requester_role"].fillna(UNKNOWN_ROLE)
-
-    def combine_project(values: pd.Series) -> str:
-        cleaned = sorted({str(v).strip() for v in values if pd.notna(v) and str(v).strip()})
-        return " / ".join(cleaned) if cleaned else "未定义"
-
-    working["availability_date"] = working["Availability Date"].dt.date
-    summary = (
-        working.groupby(["Requester Email", "availability_date"], dropna=False)
-        .agg(
-            msu_due=("MSU", "sum"),
-            open_items=("PDE Checking", "count"),
-            max_pde=("PDE Checking", "max"),
-            avg_pde=("PDE Checking", "mean"),
-            closest_availability=("Availability Date", "min"),
-            project_label=("MRP Element Indicator", combine_project),
-            requester_role=("requester_role", "first"),
-        )
-        .reset_index()
-    )
-
-    summary["avg_pde"] = summary["avg_pde"].round(1)
-    summary["msu_due"] = summary["msu_due"].round(2)
-    summary["availability_date"] = summary["availability_date"].astype(str)
-    summary["availability_month"] = (
-        pd.to_datetime(summary["availability_date"], errors="coerce")
-        .dt.to_period("M")
-        .astype(str)
-    )
-    summary["closest_availability"] = summary["closest_availability"].dt.strftime("%Y-%m-%d")
-
-    return summary.sort_values(["closest_availability", "max_pde"], ascending=[True, False])
-
-
-def build_pde_tables(
-    pde_alerts_df: pd.DataFrame,
-    request_details_df: pd.DataFrame,
-) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
-    if not request_details_df.empty and "Item Text" in request_details_df.columns:
-        normal_summary = summarize_pde_alerts_from_details(request_details_df, fg_only=False)
-        fg_summary = summarize_pde_alerts_from_details(request_details_df, fg_only=True)
-        normal_columns, normal_records = build_pde_matrix(normal_summary)
-        fg_columns, fg_records = build_pde_matrix(fg_summary)
-        return normal_columns, normal_records, fg_columns, fg_records
-
-    normal_columns, normal_records = build_pde_matrix(pde_alerts_df)
-    fg_columns, fg_records = build_pde_matrix(pd.DataFrame())
-    return normal_columns, normal_records, fg_columns, fg_records
-
-
 def build_hc_idp_monthly_table(df: pd.DataFrame, as_percent: bool = False) -> Tuple[List[Dict], List[Dict]]:
     if df.empty:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
 
     working = df.copy()
     if "Prod Line" in working.columns:
@@ -1063,10 +809,7 @@ def build_hc_idp_monthly_table(df: pd.DataFrame, as_percent: bool = False) -> Tu
     for col in value_cols:
         working[col] = working[col].apply(format_value)
 
-    columns = [
-        {"name": ("Overall" if str(col) == "Overall Result" else str(col)), "id": str(col)}
-        for col in working.columns
-    ]
+    columns = [{"name": str(col), "id": str(col)} for col in working.columns]
     return columns, working.to_dict("records")
 
 
@@ -1484,102 +1227,6 @@ def build_production_data_table_by_plant_level(
     return columns, result_df[ordered_cols].to_dict("records")
 
 
-# ---------------------------------------------------------------------------
-# Production Detail by Dimension (Brand / Size / Variant etc.)
-# ---------------------------------------------------------------------------
-
-_PROD_DIM_COLS = ["Plant", "Brand", "Lineup", "Size", "Type", "NI/Conversion", "Prod Line", "Variant"]
-
-
-def build_production_dimension_options(df: pd.DataFrame) -> Dict[str, List[Dict[str, str]]]:
-    """Return dropdown options for each dimension column present in the data."""
-    options: Dict[str, List[Dict[str, str]]] = {}
-    for dim in _PROD_DIM_COLS:
-        if dim not in df.columns:
-            options[dim] = []
-            continue
-        unique_values = sorted(df[dim].fillna("").astype(str).str.strip().unique())
-        unique_values = [v for v in unique_values if v]
-        options[dim] = [{"label": v, "value": v} for v in unique_values]
-    return options
-
-
-def build_production_dimension_table(
-    df: pd.DataFrame,
-    group_by: List[str],
-    filters: Optional[Dict[str, List[str]]] = None,
-) -> Tuple[List[Dict], List[Dict]]:
-    """Build a production data table grouped by the selected dimensions.
-
-    The source data has the same structure as the production summary tables:
-    Plant + dimension columns + MTD / Left Production / Current Month Total + month columns.
-    """
-    if df.empty or not group_by:
-        columns = [{"name": dim, "id": dim} for dim in (group_by or ["Brand"])]
-        return columns, []
-
-    working = df.copy()
-
-    # Clean dimension columns
-    for dim in _PROD_DIM_COLS:
-        if dim in working.columns:
-            working[dim] = working[dim].fillna("").astype(str).str.strip()
-
-    # Apply filters
-    if filters:
-        for dim, selected_values in filters.items():
-            if selected_values and dim in working.columns:
-                working = working[working[dim].isin(selected_values)].copy()
-
-    if working.empty:
-        columns = [{"name": dim, "id": dim} for dim in group_by]
-        return columns, []
-
-    # Identify numeric columns: MTD, Left Production, Current Month Total + month cols
-    month_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
-    # Exclude current month (first month) – it is already covered by
-    # "Current Month Total" (= MTD + Left Production).
-    if month_cols:
-        month_cols = month_cols[1:]
-    fixed_numeric = ["MTD", "Left Production", "Current Month Total"]
-    numeric_cols = [c for c in fixed_numeric if c in working.columns] + month_cols
-
-    for col in numeric_cols:
-        working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
-
-    # Group by selected dimensions
-    valid_group_by = [g for g in group_by if g in working.columns]
-    if not valid_group_by:
-        valid_group_by = [group_by[0]] if group_by else ["Brand"]
-        for g in valid_group_by:
-            if g not in working.columns:
-                working[g] = ""
-
-    grouped = (
-        working.groupby(valid_group_by, dropna=False)[numeric_cols]
-        .sum(min_count=1)
-        .reset_index()
-    )
-
-    # Remove rows where all numeric values are 0
-    grouped = grouped[grouped[numeric_cols].abs().sum(axis=1) > 0].copy()
-
-    # Add a Total row
-    if not grouped.empty:
-        total_row = {dim: "Total" if dim == valid_group_by[0] else "" for dim in valid_group_by}
-        for col in numeric_cols:
-            total_row[col] = grouped[col].sum()
-        grouped = pd.concat([grouped, pd.DataFrame([total_row])], ignore_index=True)
-
-    # Format numeric columns
-    for col in numeric_cols:
-        grouped[col] = grouped[col].apply(lambda v: "-" if pd.isna(v) or float(v) == 0.0 else f"{float(v):,.0f}")
-
-    ordered_cols = valid_group_by + numeric_cols
-    columns = [{"name": col, "id": col} for col in ordered_cols]
-    return columns, grouped[ordered_cols].to_dict("records")
-
-
 def build_demand_hs_dataframe(hc_idp_df: pd.DataFrame, monthly_level1_df: pd.DataFrame) -> pd.DataFrame:
     if hc_idp_df.empty:
         return pd.DataFrame(columns=["Prod Line AS", "Overall Result"])
@@ -1651,7 +1298,7 @@ def build_demand_hs_table(hc_idp_df: pd.DataFrame, monthly_level1_df: pd.DataFra
 
 def build_demand_iya_table(current_df: pd.DataFrame, historical_df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
     if current_df.empty or historical_df.empty:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
 
     current = current_df.copy()
     if "Prod Line AS" not in current.columns:
@@ -1662,13 +1309,13 @@ def build_demand_iya_table(current_df: pd.DataFrame, historical_df: pd.DataFrame
 
     history = historical_df.copy()
     if "Prod Line AS" not in history.columns:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
     for col in [c for c in history.columns if c != "Prod Line AS"]:
         history[col] = pd.to_numeric(history[col], errors="coerce")
 
     month_cols = sorted([c for c in current.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
     if not month_cols:
-        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall", "id": "Overall Result"}], []
+        return [{"name": "Prod Line", "id": "Prod Line"}, {"name": "Overall Result", "id": "Overall Result"}], []
 
     history_lookup: Dict[Tuple[str, str], float] = {}
     for _, row in history.iterrows():
@@ -1743,21 +1390,20 @@ def build_demand_iya_by_quarter_table(
                 "month_labels": month_labels,
                 "prev_year_labels": prev_year_labels,
                 "col_lbe": f"{tag} LBE",
-                "col_hs": f"{tag} DSL+SSP",
+                "col_hs": f"{tag} HS",
                 "col_lbe_iya": f"{tag} LBE IYA",
-                "col_hs_iya": f"{tag} DSL+SSP IYA",
+                "col_hs_iya": f"{tag} HS IYA",
             }
         )
 
     columns = base_columns.copy()
     for spec in quarter_specs:
-        tag = spec["tag"]
         columns.extend(
             [
-                {"name": f"{tag} MSU", "id": spec["col_lbe"]},
-                {"name": f"{tag} MSU", "id": spec["col_hs"]},
-                {"name": f"{tag} IYA", "id": spec["col_lbe_iya"]},
-                {"name": f"{tag} IYA", "id": spec["col_hs_iya"]},
+                {"name": spec["col_lbe"], "id": spec["col_lbe"]},
+                {"name": spec["col_hs"], "id": spec["col_hs"]},
+                {"name": spec["col_lbe_iya"], "id": spec["col_lbe_iya"]},
+                {"name": spec["col_hs_iya"], "id": spec["col_hs_iya"]},
             ]
         )
 
@@ -1817,24 +1463,16 @@ def split_quarter_iya_tables(
 
     prod_line_col = columns[0]
     metric_cols = columns[1:]
-    # Each quarter has 4 cols: {tag} LBE, {tag} HS, {tag} LBE IYA, {tag} HS IYA
-    # Q1 = metric_cols[0:4], Q2 = metric_cols[4:8]
-    q1_cols = metric_cols[:4]
-    q2_cols = metric_cols[4:8] if len(metric_cols) >= 8 else []
+    first_quarter_cols = metric_cols[:4]
+    second_quarter_cols = metric_cols[4:8]
 
-    # LBE table: Q1 LBE + Q1 LBE IYA + Q2 LBE + Q2 LBE IYA
-    lbe_cols: List[Dict[str, Any]] = []
-    if len(q1_cols) >= 4:
-        lbe_cols.extend([q1_cols[0], q1_cols[2]])
-    if len(q2_cols) >= 4:
-        lbe_cols.extend([q2_cols[0], q2_cols[2]])
-
-    # HS table: Q1 HS + Q1 HS IYA + Q2 HS + Q2 HS IYA
-    hs_cols: List[Dict[str, Any]] = []
-    if len(q1_cols) >= 4:
-        hs_cols.extend([q1_cols[1], q1_cols[3]])
-    if len(q2_cols) >= 4:
-        hs_cols.extend([q2_cols[1], q2_cols[3]])
+    def quarter_title(quarter_cols: List[Dict[str, Any]], fallback: str) -> str:
+        if not quarter_cols:
+            return fallback
+        first_name = str(quarter_cols[0].get("name", "")).strip()
+        if first_name:
+            return f"Demand IYA by quarter - {first_name.split(' ')[0]}"
+        return fallback
 
     def build_subset(subset_cols: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         selected_cols = [prod_line_col, *subset_cols] if subset_cols else [prod_line_col]
@@ -1844,15 +1482,12 @@ def split_quarter_iya_tables(
             subset_rows.append({col_id: row.get(col_id, "-") for col_id in selected_ids if col_id})
         return selected_cols, subset_rows
 
-    lbe_columns, lbe_rows = build_subset(lbe_cols)
-    hs_columns, hs_rows = build_subset(hs_cols)
-
-    lbe_title = "Demand System LBE By Quarter"
-    hs_title = "Demand System LBE + Supply System Protection By Quarter"
+    q1_columns, q1_rows = build_subset(first_quarter_cols)
+    q2_columns, q2_rows = build_subset(second_quarter_cols)
 
     return (
-        (lbe_title, lbe_columns, lbe_rows),
-        (hs_title, hs_columns, hs_rows),
+        (quarter_title(first_quarter_cols, "Demand IYA by quarter - Quarter 1"), q1_columns, q1_rows),
+        (quarter_title(second_quarter_cols, "Demand IYA by quarter - Quarter 2"), q2_columns, q2_rows),
     )
 
 
@@ -1884,7 +1519,6 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     hc_idp_monthly = pd.DataFrame(data_bundle.get("hc_idp_monthly", []))
     production_data_df = pd.DataFrame(data_bundle.get("production_data", []))
     production_data_by_level_df = pd.DataFrame(data_bundle.get("production_data_by_level", []))
-    td_demand_by_dimension_df = pd.DataFrame(data_bundle.get("td_demand_by_dimension", []))
     td_validation_detail = pd.DataFrame(data_bundle.get("td_validation_detail", []))
     historical_shipment = pd.DataFrame(data_bundle.get("historical_shipment", []))
     pde_alerts = pd.DataFrame(data_bundle.get("pde_alerts", []))
@@ -1905,29 +1539,29 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     summary_columns, summary_data = build_item_summary(monthly_requester, ROLE_ALL_VALUE)
     page_sheets["Supply Protection"].append(("02 Monthly Summary", _snapshot_to_dataframe(summary_columns, summary_data)))
 
-    pde_columns, pde_data, pde_fg_columns, pde_fg_data = build_pde_tables(pde_alerts, request_details)
+    pde_columns, pde_data = build_pde_matrix(pde_alerts)
     page_sheets["Supply Protection"].append(("03 Past Due Alerts", _snapshot_to_dataframe(pde_columns, pde_data)))
 
     drill_columns, drill_rows = build_role_item_project_summary(request_details, ROLE_ALL_VALUE, [], [])
     page_sheets["Project Details"].append(("01 Role x Item x Project", _snapshot_to_dataframe(drill_columns, drill_rows)))
 
     hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
-    page_sheets["Demand Assumption"].append(("01 Demand System LBE", _snapshot_to_dataframe(hc_idp_columns, hc_idp_rows)))
+    page_sheets["Demand Assumption"].append(("01 Demand LBE", _snapshot_to_dataframe(hc_idp_columns, hc_idp_rows)))
 
     hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
     hc_idp_hs_columns, hc_idp_hs_rows = build_hc_idp_monthly_table(hc_idp_hs_df)
-    page_sheets["Demand Assumption"].append(("02 Demand System LBE + Supply System Protection", _snapshot_to_dataframe(hc_idp_hs_columns, hc_idp_hs_rows)))
+    page_sheets["Demand Assumption"].append(("02 Demand HS", _snapshot_to_dataframe(hc_idp_hs_columns, hc_idp_hs_rows)))
 
     hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
-    page_sheets["Demand Assumption"].append(("03 Demand System LBE IYA", _snapshot_to_dataframe(hc_idp_iya_columns, hc_idp_iya_rows)))
+    page_sheets["Demand Assumption"].append(("03 Demand LBE IYA", _snapshot_to_dataframe(hc_idp_iya_columns, hc_idp_iya_rows)))
 
     hc_idp_hs_iya_columns, hc_idp_hs_iya_rows = build_demand_iya_table(hc_idp_hs_df, historical_shipment)
-    page_sheets["Demand Assumption"].append(("04 Demand System LBE + Supply System Protection IYA", _snapshot_to_dataframe(hc_idp_hs_iya_columns, hc_idp_hs_iya_rows)))
+    page_sheets["Demand Assumption"].append(("04 Demand HS IYA", _snapshot_to_dataframe(hc_idp_hs_iya_columns, hc_idp_hs_iya_rows)))
 
     quarter_columns, quarter_rows = build_demand_iya_by_quarter_table(hc_idp_monthly, hc_idp_hs_df, historical_shipment)
     (_, q1_columns, q1_rows), (_, q2_columns, q2_rows) = split_quarter_iya_tables(quarter_columns, quarter_rows)
-    page_sheets["Demand Assumption"].append(("05 Demand System LBE Quarter", _snapshot_to_dataframe(q1_columns, q1_rows)))
-    page_sheets["Demand Assumption"].append(("06 Demand SysLBE+SSP Quarter", _snapshot_to_dataframe(q2_columns, q2_rows)))
+    page_sheets["Demand Assumption"].append(("05 Demand IYA Quarter 1", _snapshot_to_dataframe(q1_columns, q1_rows)))
+    page_sheets["Demand Assumption"].append(("06 Demand IYA Quarter 2", _snapshot_to_dataframe(q2_columns, q2_rows)))
 
     level1_core_columns, level1_core_rows = build_first_level_summary(
         monthly_level1,
@@ -1949,10 +1583,17 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     page_sheets["Demand Data"].append(("01 TD Version Monthly Comparison", _snapshot_to_dataframe(td_validation_columns, td_validation_rows)))
 
     production_group_1 = ["0386", "1864", "A868"]
+    production_group_2 = ["C810", "D352", "A673"]
     production_group_1_totals_after = {
         "0386": ("HP Total", ["0386", "C810"]),
         "1864": ("XQ Total", ["1864", "D352"]),
         "A868": ("TC Total", ["A868", "A673"]),
+    }
+    production_group_2_level = ["C810", "D352", "A673"]
+    production_group_2_totals_after = {
+        "C810": ("HP Total", ["0386", "C810"]),
+        "D352": ("XQ Total", ["1864", "D352"]),
+        "A673": ("TC Total", ["A868", "A673"]),
     }
 
     p1_columns, p1_rows = build_production_data_table_by_plant(
@@ -1970,11 +1611,20 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     )
     page_sheets["Production Data"].append(("02 Table2 Plant-Level1-Level2", _snapshot_to_dataframe(p2_columns, p2_rows)))
 
-    if not td_demand_by_dimension_df.empty:
-        dim_columns, dim_rows = build_production_dimension_table(
-            td_demand_by_dimension_df, ["Brand", "Size", "Variant"]
-        )
-        page_sheets["Production Data"].append(("03 Detail Brand-Size-Variant", _snapshot_to_dataframe(dim_columns, dim_rows)))
+    p3_columns, p3_rows = build_production_data_table_by_plant(
+        production_data_df,
+        plant_order=production_group_2,
+        include_segment_totals=False,
+    )
+    page_sheets["Production Data"].append(("03 Table3 By Plant", _snapshot_to_dataframe(p3_columns, p3_rows)))
+
+    p4_columns, p4_rows = build_production_data_table_by_plant_level(
+        production_data_by_level_df,
+        plant_order=production_group_2_level,
+        include_segment_totals=True,
+        segment_totals_after=production_group_2_totals_after,
+    )
+    page_sheets["Production Data"].append(("04 Table4 Plant-Level1-Level2", _snapshot_to_dataframe(p4_columns, p4_rows)))
 
     page_sheets["Raw Data"].extend(
         [
@@ -1988,14 +1638,12 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
             ("08 historical_shipment", historical_shipment),
             ("09 pde_alerts", pde_alerts),
             ("10 request_details", request_details),
-            ("11 td_demand_by_dimension", td_demand_by_dimension_df),
         ]
     )
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = cfg.processed_dir.parent / "history" / "dashboard_snapshots" / f"snapshot_{timestamp}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    logging.info("Snapshot output directory: %s (exists=%s)", out_dir, out_dir.exists())
 
     excel_path = out_dir / f"dashboard_snapshot_{timestamp}.xlsx"
     page_prefix = {
@@ -2556,34 +2204,11 @@ def build_mrp_indicator_options(df: pd.DataFrame, role: str, requester_emails: O
     return [{"label": val, "value": val} for val in indicators]
 
 
-def build_item_text_options(df: pd.DataFrame, role: str, requester_emails: Optional[List[str]] = None, mrp_indicators: Optional[List[str]] = None) -> List[Dict[str, str]]:
-    if df.empty or "Item Text" not in df.columns:
-        return []
-    working = df.copy()
-    if "requester_role" in working.columns:
-        working["requester_role"] = working["requester_role"].fillna(UNKNOWN_ROLE)
-    if role and role != ROLE_ALL_VALUE and "requester_role" in working.columns:
-        working = working[working["requester_role"] == role]
-    selected_emails = normalize_requester_values(requester_emails)
-    if selected_emails and "Requester Email" in working.columns:
-        working = working[working["Requester Email"].fillna("").astype(str).isin(set(selected_emails))]
-    selected_mrp = normalize_mrp_values(mrp_indicators)
-    if selected_mrp and "MRP Element Indicator" in working.columns:
-        working = working[working["MRP Element Indicator"].astype(str).isin(set(selected_mrp))]
-    items = sorted({
-        str(val).strip()
-        for val in working["Item Text"].dropna().tolist()
-        if str(val).strip()
-    })
-    return [{"label": val, "value": val} for val in items]
-
-
 def build_role_item_project_summary(
     df: pd.DataFrame,
     role: str,
     requester_emails: Optional[List[str]] = None,
     mrp_indicators: Optional[List[str]] = None,
-    item_texts: Optional[List[str]] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     base_columns = [
         {"name": "Role", "id": "Role"},
@@ -2613,10 +2238,6 @@ def build_role_item_project_summary(
     selected_mrp_indicators = normalize_mrp_values(mrp_indicators)
     if selected_mrp_indicators:
         working = working[working["MRP Element Indicator"].astype(str).isin(set(selected_mrp_indicators))]
-
-    selected_item_texts = normalize_mrp_values(item_texts)
-    if selected_item_texts:
-        working = working[working["Item Text"].astype(str).isin(set(selected_item_texts))]
 
     if working.empty:
         return base_columns + [{"name": TOTAL_LABEL, "id": TOTAL_LABEL}], []
@@ -2674,34 +2295,7 @@ def build_role_item_project_summary(
         records_with_totals.append((total_value if pd.notna(total_value) else 0, record))
 
     sorted_records = [rec for _, rec in sorted(records_with_totals, key=lambda item: item[0], reverse=True)]
-
-    total_record: Dict[str, Any] = {
-        "Role": TOTAL_LABEL,
-        "Item Text": TOTAL_LABEL,
-        "MRP Element Indicator": "",
-        "__role_raw": TOTAL_LABEL,
-    }
-    for month in months:
-        total_record[month] = fmt(pd.to_numeric(pivot[month], errors="coerce").fillna(0.0).sum(min_count=1))
-    total_record[TOTAL_LABEL] = fmt(pd.to_numeric(pivot[TOTAL_LABEL], errors="coerce").fillna(0.0).sum(min_count=1))
-    sorted_records.append(total_record)
-
     return columns, sorted_records
-
-
-def extract_role_item_project_total_row(
-    columns: List[Dict[str, Any]],
-    rows: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    total_rows = [
-        row for row in (rows or [])
-        if str(row.get("Role", "")).strip() == TOTAL_LABEL and str(row.get("Item Text", "")).strip() == TOTAL_LABEL
-    ]
-    non_total_rows = [
-        row for row in (rows or [])
-        if not (str(row.get("Role", "")).strip() == TOTAL_LABEL and str(row.get("Item Text", "")).strip() == TOTAL_LABEL)
-    ]
-    return columns or [], total_rows[:1], non_total_rows
 
 
 def build_modal_detail_rows(
@@ -2710,7 +2304,6 @@ def build_modal_detail_rows(
     item_text: str,
     mrp_indicator: str,
     requester_emails: Optional[List[str]] = None,
-    selected_month: Optional[str] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     if df.empty:
         columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
@@ -2727,14 +2320,6 @@ def build_modal_detail_rows(
     selected_emails = normalize_requester_values(requester_emails)
     if selected_emails and "Requester Email" in working.columns:
         working = working[working["Requester Email"].fillna("").astype(str).isin(set(selected_emails))]
-
-    if selected_month and re.fullmatch(r"\d{4}-\d{2}", str(selected_month).strip()):
-        month_value = str(selected_month).strip()
-        if "availability_month" in working.columns:
-            working = working[working["availability_month"].astype(str).str.strip() == month_value]
-        elif "Availability Date" in working.columns:
-            derived_month = pd.to_datetime(working["Availability Date"], errors="coerce").dt.to_period("M").astype(str)
-            working = working[derived_month == month_value]
 
     if working.empty:
         columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
@@ -2902,12 +2487,11 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     role_options = build_role_options(monthly_requester)
     default_role = role_options[0]["value"] if role_options else ROLE_ALL_VALUE
     role_matrix_columns, role_matrix_data = build_monthly_matrix(monthly_requester, ROLE_ALL_VALUE)
-    pde_columns, pde_data, pde_fg_columns, pde_fg_data = build_pde_tables(pde_alerts, request_details)
+    summary_columns, summary_data = build_item_summary(monthly_requester, default_role)
+    pde_columns, pde_data = build_pde_matrix(pde_alerts)
     summary_drill_columns, summary_drill_rows = build_role_item_project_summary(request_details, default_role)
-    summary_total_columns, summary_total_rows, summary_drill_rows = extract_role_item_project_total_row(summary_drill_columns, summary_drill_rows)
     drill_requester_options = build_requester_email_options(request_details, default_role)
     drill_mrp_options = build_mrp_indicator_options(request_details, default_role)
-    drill_item_text_options = build_item_text_options(request_details, default_role)
 
     level1_core_columns, level1_core_rows = build_first_level_summary(
         monthly_level1,
@@ -2936,10 +2520,17 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         hc_idp_quarter_iya_rows,
     )
     production_group_1 = ["0386", "1864", "A868"]
+    production_group_2 = ["C810", "D352", "A673"]
     production_group_1_totals_after = {
         "0386": ("HP Total", ["0386", "C810"]),
         "1864": ("XQ Total", ["1864", "D352"]),
         "A868": ("TC Total", ["A868", "A673"]),
+    }
+    production_group_2_level = ["C810", "D352", "A673"]
+    production_group_2_totals_after = {
+        "C810": ("HP Total", ["0386", "C810"]),
+        "D352": ("XQ Total", ["1864", "D352"]),
+        "A673": ("TC Total", ["A868", "A673"]),
     }
     production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
         production_data_df,
@@ -2949,6 +2540,17 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     production_level_columns_1, production_level_rows_1 = build_production_data_table_by_plant_level(
         production_data_by_level_df,
         plant_order=production_group_1,
+    )
+    production_plant_columns_2, production_plant_rows_2 = build_production_data_table_by_plant(
+        production_data_df,
+        plant_order=production_group_2,
+        include_segment_totals=False,
+    )
+    production_level_columns_2, production_level_rows_2 = build_production_data_table_by_plant_level(
+        production_data_by_level_df,
+        plant_order=production_group_2_level,
+        include_segment_totals=True,
+        segment_totals_after=production_group_2_totals_after,
     )
     td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
     td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
@@ -3051,6 +2653,22 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 ],
             ),
             html.Div(
+                className="summary-panel",
+                children=[
+                    html.H3("Monthly Summary"),
+                    DataTable(
+                        id="monthly-summary",
+                        columns=summary_columns,
+                        data=summary_data,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                    ),
+                ],
+            ),
+            html.Div(
                 className="pde-panel",
                 children=[
                     html.H3("Past Due Alerts"),
@@ -3058,35 +2676,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         id="pde-table",
                         columns=pde_columns,
                         data=pde_data,
-                        style_header=PDE_STYLE_HEADER,
-                        style_cell=PDE_STYLE_CELL,
-                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
-                        style_cell_conditional=[
-                            {
-                                "if": {"column_id": "Requester Email"},
-                                "textAlign": "center",
-                                "whiteSpace": "normal",
-                                "height": "auto",
-                                "minWidth": "180px",
-                                "width": "auto",
-                            },
-                            {
-                                "if": {"column_id": "Project"},
-                                "textAlign": "center",
-                                "whiteSpace": "normal",
-                                "height": "auto",
-                                "minWidth": "320px",
-                                "width": "auto",
-                            },
-                        ],
-                        page_size=10,
-                        style_table={"overflowX": "auto"},
-                    ),
-                    html.H3("FG Rolling", style={"marginTop": "14px"}),
-                    DataTable(
-                        id="pde-fg-table",
-                        columns=pde_fg_columns,
-                        data=pde_fg_data,
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
@@ -3150,7 +2739,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                             ),
                             html.P("点击任意组合即可查看对应的所有物料请求明细"),
                             html.Div(
-                                style={"display": "grid", "gridTemplateColumns": "minmax(300px, 1fr) minmax(260px, 0.8fr) minmax(220px, 0.7fr)", "gap": "10px", "maxWidth": "1100px"},
+                                style={"display": "grid", "gridTemplateColumns": "minmax(300px, 1fr) minmax(260px, 0.8fr)", "gap": "10px", "maxWidth": "860px"},
                                 children=[
                                     dcc.Dropdown(
                                         id="drill-requester-filter",
@@ -3170,15 +2759,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                         clearable=True,
                                         searchable=True,
                                     ),
-                                    dcc.Dropdown(
-                                        id="drill-item-text-filter",
-                                        options=drill_item_text_options,
-                                        value=[],
-                                        placeholder="筛选 Item Text（可多选+搜索）",
-                                        multi=True,
-                                        clearable=True,
-                                        searchable=True,
-                                    ),
                                 ],
                             ),
                         ],
@@ -3192,43 +2772,13 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 data=summary_drill_rows,
                                 style_header=PDE_STYLE_HEADER,
                                 style_cell=PDE_STYLE_CELL,
-                                style_data_conditional=[
-                                    *PDE_STYLE_DATA_CONDITIONAL,
-                                    {
-                                        "if": {"filter_query": '{Role} = "Total" && {Item Text} = "Total"'},
-                                        "fontWeight": "700",
-                                        "backgroundColor": "#eaf2ff",
-                                    },
-                                ],
+                                style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
                                 page_size=10,
                                 style_table={"overflowX": "auto"},
                                 sort_action="native",
                                 filter_action="none",
                             )
                         )
-                    ),
-                    html.Div(
-                        className="drill-table-wrapper",
-                        style={"marginTop": "8px"},
-                        children=[
-                            html.H4("Total（跨所有分页汇总）", style={"margin": "0 0 8px 0"}),
-                            DataTable(
-                                id="role-item-mrp-total-summary",
-                                columns=summary_total_columns,
-                                data=summary_total_rows,
-                                style_header=PDE_STYLE_HEADER,
-                                style_cell=PDE_STYLE_CELL,
-                                style_data_conditional=[
-                                    {
-                                        "if": {"filter_query": '{Role} = "Total" && {Item Text} = "Total"'},
-                                        "fontWeight": "700",
-                                        "backgroundColor": "#eaf2ff",
-                                    },
-                                ],
-                                page_action="none",
-                                style_table={"overflowX": "auto"},
-                            ),
-                        ],
                     ),
                     html.Div(
                         className="drill-detail-panel",
@@ -3276,7 +2826,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand System LBE"),
+                            html.H3("Demand LBE"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-monthly-table",
@@ -3295,7 +2845,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand System LBE IYA"),
+                            html.H3("Demand LBE IYA"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-monthly-iya-table",
@@ -3314,7 +2864,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand System LBE + Supply System Protection"),
+                            html.H3("Demand HS"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-hs-table",
@@ -3333,7 +2883,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         className="demand-table-card",
                         children=[
-                            html.H3("Demand System LBE + Supply System Protection IYA"),
+                            html.H3("Demand HS IYA"),
                             dcc.Loading(
                                 DataTable(
                                     id="hc-idp-hs-iya-table",
@@ -3552,225 +3102,130 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                 className="summary-panel",
                 children=[
                     html.H3("Production Data"),
-                    dcc.Tabs(
-                        id="production-sub-tabs",
-                        value="prod-summary",
-                        className="sub-tabs",
-                        children=[
-                            dcc.Tab(
-                                label="Summary",
-                                value="prod-summary",
-                                children=[
-                                    html.Div(
-                                        style={"paddingTop": "12px"},
-                                        children=[
-                                            html.H4("Production Data (By Plant) - Table 1"),
-                                            DataTable(
-                                                id="production-data-plant-table-1",
-                                                columns=production_plant_columns_1,
-                                                data=production_plant_rows_1,
-                                                style_header=PDE_STYLE_HEADER,
-                                                style_cell=PDE_STYLE_CELL,
-                                                style_data_conditional=[
-                                                    *PDE_STYLE_DATA_CONDITIONAL,
-                                                    {
-                                                        "if": {
-                                                            "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
-                                                        },
-                                                        "fontWeight": "700",
-                                                        "backgroundColor": "#f3f8ff",
-                                                    },
-                                                    {
-                                                        "if": {"filter_query": '{Plant} = "GC Total"'},
-                                                        "fontWeight": "700",
-                                                        "backgroundColor": "#edf4ff",
-                                                    },
-                                                ],
-                                                style_cell_conditional=[
-                                                    {"if": {"column_id": "Plant"}, "textAlign": "left"},
-                                                ],
-                                                page_action="none",
-                                                style_table={"overflowX": "auto"},
-                                                sort_action="native",
-                                                filter_action="none",
-                                            ),
-                                            html.H4("Production Data (By Plant / Level1 / Level2) - Table 2", style={"marginTop": "18px"}),
-                                            DataTable(
-                                                id="production-data-level-table-2",
-                                                columns=production_level_columns_1,
-                                                data=production_level_rows_1,
-                                                style_header=PDE_STYLE_HEADER,
-                                                style_cell=PDE_STYLE_CELL,
-                                                style_data_conditional=[
-                                                    *PDE_STYLE_DATA_CONDITIONAL,
-                                                    {
-                                                        "if": {
-                                                            "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
-                                                        },
-                                                        "fontWeight": "700",
-                                                        "backgroundColor": "#f3f8ff",
-                                                    },
-                                                    {
-                                                        "if": {"filter_query": '{Plant} = "GC Total"'},
-                                                        "fontWeight": "700",
-                                                        "backgroundColor": "#edf4ff",
-                                                    },
-                                                ],
-                                                style_cell_conditional=[
-                                                    {"if": {"column_id": "Plant"}, "textAlign": "left"},
-                                                    {"if": {"column_id": "Level1"}, "textAlign": "left"},
-                                                    {"if": {"column_id": "Level2"}, "textAlign": "left"},
-                                                ],
-                                                page_action="none",
-                                                style_table={"overflowX": "auto"},
-                                                sort_action="native",
-                                                filter_action="none",
-                                            ),
-                                        ],
-                                    ),
-                                ],
-                            ),
-                            dcc.Tab(
-                                label="Detail by Brand/Size/Variant",
-                                value="prod-detail-dim",
-                                children=[
-                                    html.Div(
-                                        style={"paddingTop": "12px"},
-                                        children=[
-                                            html.H4("TD Demand by Dimension (Brand / Size / Variant)"),
-                                            html.P(
-                                                "Select dimensions to group by and filter values. Data from the latest TD Report (MSU).",
-                                                style={"color": "#666", "fontSize": "13px", "marginBottom": "10px"},
-                                            ),
-                                            html.Div(
-                                                style={
-                                                    "display": "flex",
-                                                    "flexWrap": "wrap",
-                                                    "gap": "12px",
-                                                    "marginBottom": "14px",
-                                                    "alignItems": "flex-end",
-                                                },
-                                                children=[
-                                                    html.Div(
-                                                        style={"minWidth": "200px", "flex": "1"},
-                                                        children=[
-                                                            html.Label("Group By", style={"fontWeight": "600", "fontSize": "13px"}),
-                                                            dcc.Dropdown(
-                                                                id="prod-dim-group-by",
-                                                                options=[{"label": d, "value": d} for d in _PROD_DIM_COLS],
-                                                                value=["Plant", "Brand", "Size", "Variant"],
-                                                                multi=True,
-                                                                placeholder="Select dimensions to group by...",
-                                                            ),
-                                                        ],
-                                                    ),
-                                                    html.Div(
-                                                        style={"minWidth": "120px", "flex": "1"},
-                                                        children=[
-                                                            html.Label("Plant", style={"fontWeight": "600", "fontSize": "13px"}),
-                                                            dcc.Dropdown(
-                                                                id="prod-dim-filter-plant",
-                                                                options=[],
-                                                                value=[],
-                                                                multi=True,
-                                                                placeholder="All",
-                                                            ),
-                                                        ],
-                                                    ),
-                                                    html.Div(
-                                                        style={"minWidth": "150px", "flex": "1"},
-                                                        children=[
-                                                            html.Label("Brand", style={"fontWeight": "600", "fontSize": "13px"}),
-                                                            dcc.Dropdown(
-                                                                id="prod-dim-filter-brand",
-                                                                options=[],
-                                                                value=[],
-                                                                multi=True,
-                                                                placeholder="All",
-                                                            ),
-                                                        ],
-                                                    ),
-                                                    html.Div(
-                                                        style={"minWidth": "120px", "flex": "1"},
-                                                        children=[
-                                                            html.Label("Size", style={"fontWeight": "600", "fontSize": "13px"}),
-                                                            dcc.Dropdown(
-                                                                id="prod-dim-filter-size",
-                                                                options=[],
-                                                                value=[],
-                                                                multi=True,
-                                                                placeholder="All",
-                                                            ),
-                                                        ],
-                                                    ),
-                                                    html.Div(
-                                                        style={"minWidth": "120px", "flex": "1"},
-                                                        children=[
-                                                            html.Label("Variant", style={"fontWeight": "600", "fontSize": "13px"}),
-                                                            dcc.Dropdown(
-                                                                id="prod-dim-filter-variant",
-                                                                options=[],
-                                                                value=[],
-                                                                multi=True,
-                                                                placeholder="All",
-                                                            ),
-                                                        ],
-                                                    ),
-                                                    html.Div(
-                                                        style={"minWidth": "120px", "flex": "1"},
-                                                        children=[
-                                                            html.Label("Prod Line", style={"fontWeight": "600", "fontSize": "13px"}),
-                                                            dcc.Dropdown(
-                                                                id="prod-dim-filter-prodline",
-                                                                options=[],
-                                                                value=[],
-                                                                multi=True,
-                                                                placeholder="All",
-                                                            ),
-                                                        ],
-                                                    ),
-                                                    html.Div(
-                                                        style={"minWidth": "100px", "flex": "1"},
-                                                        children=[
-                                                            html.Label("Type", style={"fontWeight": "600", "fontSize": "13px"}),
-                                                            dcc.Dropdown(
-                                                                id="prod-dim-filter-type",
-                                                                options=[],
-                                                                value=[],
-                                                                multi=True,
-                                                                placeholder="All",
-                                                            ),
-                                                        ],
-                                                    ),
-                                                ],
-                                            ),
-                                            DataTable(
-                                                id="production-dim-detail-table",
-                                                columns=[],
-                                                data=[],
-                                                style_header=PDE_STYLE_HEADER,
-                                                style_cell=PDE_STYLE_CELL,
-                                                style_data_conditional=[
-                                                    *PDE_STYLE_DATA_CONDITIONAL,
-                                                    {
-                                                        "if": {"filter_query": '{Plant} = "Total" || {Brand} = "Total" || {Lineup} = "Total" || {Size} = "Total" || {Variant} = "Total" || {Type} = "Total" || {Prod Line} = "Total"'},
-                                                        "fontWeight": "700",
-                                                        "backgroundColor": "#f3f8ff",
-                                                    },
-                                                ],
-                                                style_cell_conditional=[
-                                                    {"if": {"column_id": d}, "textAlign": "left"} for d in _PROD_DIM_COLS
-                                                ],
-                                                page_action="none",
-                                                style_table={"overflowX": "auto"},
-                                                sort_action="native",
-                                                filter_action="none",
-                                            ),
-                                        ],
-                                    ),
-                                ],
-                            ),
+                    html.P("说明：当前数据不可读，验证中。"),
+                    html.H4("Production Data (By Plant) - Table 1"),
+                    DataTable(
+                        id="production-data-plant-table-1",
+                        columns=production_plant_columns_1,
+                        data=production_plant_rows_1,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
                         ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
+                    ),
+                    html.H4("Production Data (By Plant / Level1 / Level2) - Table 2", style={"marginTop": "18px"}),
+                    DataTable(
+                        id="production-data-level-table-2",
+                        columns=production_level_columns_1,
+                        data=production_level_rows_1,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level1"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level2"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
+                    ),
+                    html.H4("Production Data (By Plant) - Table 3", style={"marginTop": "18px"}),
+                    DataTable(
+                        id="production-data-plant-table-3",
+                        columns=production_plant_columns_2,
+                        data=production_plant_rows_2,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
+                    ),
+                    html.H4("Production Data (By Plant / Level1 / Level2) - Table 4", style={"marginTop": "18px"}),
+                    DataTable(
+                        id="production-data-level-table-4",
+                        columns=production_level_columns_2,
+                        data=production_level_rows_2,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {
+                                    "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                },
+                                "fontWeight": "700",
+                                "backgroundColor": "#f3f8ff",
+                            },
+                            {
+                                "if": {"filter_query": '{Plant} = "GC Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#edf4ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level1"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level2"}, "textAlign": "left"},
+                        ],
+                        page_action="none",
+                        style_table={"overflowX": "auto"},
+                        sort_action="native",
+                        filter_action="none",
                     ),
                 ],
             ),
@@ -3781,60 +3236,36 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         className="page",
         children=[
             dcc.Interval(id="refresh-interval", interval=15 * 60 * 1000, n_intervals=0),
-            dcc.Interval(id="pipeline-progress-interval", interval=1000, n_intervals=0, disabled=True),
-            dcc.Interval(id="force-refresh-poll", interval=5000, n_intervals=0),
             dcc.Store(id="data-store", data=data_bundle),
             dcc.Store(id="details-version-store", data={"version": details_version}),
-            dcc.Store(id="data-version-store", data=_read_data_version()),
-            # --- hidden placeholders that admin callbacks target ---
-            dcc.Dropdown(id="refresh-scope-dropdown", value="all", style={"display": "none"}),
-            html.Button(id="manual-refresh-btn", n_clicks=0, style={"display": "none"}),
-            html.Div(id="pipeline-progress-container", style={"display": "none"}),
-            html.Div(id="pipeline-progress-fill", style={"display": "none"}),
-            html.Span("", id="pipeline-progress-pct", style={"display": "none"}),
-            html.Div("", id="pipeline-progress-text", style={"display": "none"}),
-            html.Span("", id="manual-refresh-status", style={"display": "none"}),
-            html.Button(id="backup-snapshot-btn", n_clicks=0, style={"display": "none"}),
-            html.Span("", id="backup-snapshot-status", style={"display": "none"}),
-            dcc.Download(id="backup-snapshot-download"),
             html.Div(
                 className="hero",
                 children=[
                     html.Div(
                         [
                             html.H1("Hair Care Supply Protection Command Center"),
+                            html.P("(MVP)"),
                         ]
                     ),
                     html.Div(
-                        style={"display": "flex", "gap": "6px", "marginLeft": "auto", "alignSelf": "center", "alignItems": "center"},
+                        style={
+                            "display": "flex",
+                            "flexDirection": "column",
+                            "alignItems": "flex-end",
+                            "gap": "8px",
+                            "minWidth": "260px",
+                            "marginLeft": "auto",
+                        },
                         children=[
+                            html.Button("Backup Snapshot", id="backup-snapshot-btn", n_clicks=0),
+                            html.Span("", id="backup-snapshot-status", style={"fontSize": "13px", "color": "#334155", "textAlign": "right"}),
                             html.A(
-                                html.Span("\U0001F4D6", style={
-                                    "fontSize": "18px",
-                                    "color": "#94a3b8",
-                                    "cursor": "pointer",
-                                    "padding": "4px 8px",
-                                    "borderRadius": "8px",
-                                    "transition": "color 0.2s",
-                                }),
-                                href="/docs/user-guide",
+                                html.Button("Refresh Mail & Open HTML", id="refresh-mail-open-btn", n_clicks=0),
+                                href="/mail-preview/latest",
                                 target="_blank",
-                                title="User Guide",
                                 style={"textDecoration": "none"},
                             ),
-                            html.A(
-                                html.Span("\u2699", style={
-                                    "fontSize": "22px",
-                                    "color": "#94a3b8",
-                                    "cursor": "pointer",
-                                    "padding": "4px 8px",
-                                    "borderRadius": "8px",
-                                    "transition": "color 0.2s",
-                                }),
-                                href="/admin",
-                                title="Admin Panel",
-                                style={"textDecoration": "none"},
-                            ),
+                            dcc.Download(id="backup-snapshot-download"),
                         ],
                     ),
                 ],
@@ -3842,361 +3273,21 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
             dcc.Tabs(
                 id="page-tabs",
                 value="demand-assumption",
-                children=[demand_assumption_tab, production_data_tab, overview_tab, drill_tab, data_validation_tab],
-            ),
-        ],
-    )
-
-
-def build_admin_layout(cfg: AppConfig) -> html.Div:
-    """Build the /admin page layout with login gate and management panel."""
-    return html.Div(
-        className="admin-page",
-        children=[
-            dcc.Store(id="admin-session", storage_type="session", data={"authenticated": False}),
-            # ── Login form (visible when not authenticated) ──
-            html.Div(
-                id="admin-login-box",
-                className="admin-login-box",
-                children=[
-                    html.H2("Admin Login", style={"margin": "0 0 16px 0", "color": "#1e3a8a"}),
-                    dcc.Input(
-                        id="admin-password-input",
-                        type="password",
-                        placeholder="Enter password",
-                        className="admin-input",
-                        n_submit=0,
-                    ),
-                    html.Button("Login", id="admin-login-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
-                    html.Span("", id="admin-login-error", style={"color": "#dc2626", "fontSize": "13px", "marginTop": "6px"}),
-                ],
-            ),
-            # ── Admin panel (hidden until authenticated) ──
-            html.Div(
-                id="admin-panel",
-                className="admin-panel",
-                style={"display": "none"},
-                children=[
-                    html.Div(
-                        className="admin-header",
-                        children=[
-                            html.Div([
-                                html.H1("Admin Panel", style={"margin": "0", "color": "#1e3a8a"}),
-                                html.Span(
-                                    f"Git: {_get_git_version()}",
-                                    style={"fontSize": "12px", "color": "#6b7280", "marginTop": "4px", "display": "block"},
-                                ),
-                            ]),
-                            html.A(
-                                html.Button("Back to Dashboard", className="admin-btn"),
-                                href="/",
-                                style={"textDecoration": "none"},
-                            ),
-                        ],
-                    ),
-                    # ── Card 1: Run Pipeline & Refresh ──
-                    html.Div(
-                        className="admin-card",
-                        children=[
-                            html.H3("\U0001F504 Run Pipeline & Refresh"),
-                            html.P("Run the data pipeline and refresh dashboard data."),
-                            html.Div(
-                                style={"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"},
-                                children=[
-                                    dcc.Dropdown(
-                                        id="admin-refresh-scope",
-                                        options=[
-                                            {"label": info["label"], "value": key}
-                                            for key, info in REFRESH_GROUPS.items()
-                                        ],
-                                        value="all",
-                                        clearable=False,
-                                        style={"width": "200px", "fontSize": "13px"},
-                                    ),
-                                    html.Button("Run Pipeline", id="admin-run-pipeline-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
-                                ],
-                            ),
-                            html.Div(
-                                id="admin-pipeline-progress",
-                                style={"marginTop": "10px", "display": "none"},
-                                children=[
-                                    html.Div(
-                                        style={
-                                            "background": "#e5e7eb", "borderRadius": "4px",
-                                            "height": "18px", "overflow": "hidden",
-                                            "position": "relative", "width": "100%",
-                                        },
-                                        children=[
-                                            html.Div(id="admin-progress-fill", style={
-                                                "width": "0%", "height": "100%",
-                                                "backgroundColor": "#3b82f6", "borderRadius": "4px",
-                                                "transition": "width 0.4s ease",
-                                            }),
-                                            html.Span("0%", id="admin-progress-pct", style={
-                                                "position": "absolute", "top": "0", "left": "50%",
-                                                "transform": "translateX(-50%)", "fontSize": "11px",
-                                                "lineHeight": "18px", "color": "#1f2937", "fontWeight": "600",
-                                            }),
-                                        ],
-                                    ),
-                                    html.Div("", id="admin-progress-text", style={
-                                        "fontSize": "12px", "color": "#6b7280",
-                                        "marginTop": "2px", "textAlign": "center",
-                                    }),
-                                ],
-                            ),
-                            dcc.Interval(id="admin-pipeline-interval", interval=1000, n_intervals=0, disabled=True),
-                            html.Span("", id="admin-pipeline-status", style={"fontSize": "13px", "color": "#16a34a", "marginTop": "6px", "display": "block"}),
-                        ],
-                    ),
-                    # ── Card 2: Refresh Data ──
-                    html.Div(
-                        className="admin-card",
-                        children=[
-                            html.H3("\U0001F4C4 Refresh Data"),
-                            html.P("Reload dashboard data from processed CSV files without re-running the pipeline."),
-                            html.Button("Refresh Data", id="admin-refresh-data-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
-                            html.Span("", id="admin-refresh-data-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
-                        ],
-                    ),
-                    # ── Card 3: Backup Snapshot ──
-                    html.Div(
-                        className="admin-card",
-                        children=[
-                            html.H3("\U0001F4BE Backup Snapshot"),
-                            html.P("Export all dashboard tables to an Excel snapshot."),
-                            html.Button("Create Backup", id="admin-backup-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
-                            dcc.Download(id="admin-backup-download"),
-                            html.Span("", id="admin-backup-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
-                        ],
-                    ),
-                    # ── Card 4: Weekly Mail Preview ──
-                    html.Div(
-                        className="admin-card",
-                        children=[
-                            html.H3("\U00002709 Weekly Mail Preview"),
-                            html.P("Regenerate and open the weekly mail HTML preview."),
-                            html.A(
-                                html.Button("Refresh Mail & Open", id="admin-mail-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
-                                href="/mail-preview/latest",
-                                target="_blank",
-                                style={"textDecoration": "none"},
-                            ),
-                        ],
-                    ),
-                    # ── Card 5: Update & Restart ──
-                    html.Div(
-                        className="admin-card",
-                        children=[
-                            html.H3("\U0001F680 Update & Restart"),
-                            html.P("Pull latest code from GitHub, install dependencies, and restart the application. After restart, pipeline will run automatically."),
-                            html.Button("Update & Restart", id="admin-update-btn", n_clicks=0, className="admin-btn admin-btn--danger"),
-                            html.Span("", id="admin-update-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block", "whiteSpace": "pre-wrap"}),
-                        ],
-                    ),
-                    # ── Card 6: Master Data Update ──
-                    html.Div(
-                        className="admin-card",
-                        children=[
-                            html.H3("\U0001F50D Master Data Update"),
-                            html.P("Scan Production Volume data for materials missing Seg mapping or SU Factor in Parameter."),
-                            html.Div(
-                                style={"display": "flex", "gap": "8px", "alignItems": "center", "flexWrap": "wrap"},
-                                children=[
-                                    html.Button("Scan Missing Data", id="admin-masterdata-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
-                                    html.Button("Export to Excel", id="admin-masterdata-export-btn", n_clicks=0, className="admin-btn"),
-                                ],
-                            ),
-                            dcc.Download(id="admin-masterdata-download"),
-                            html.Span("", id="admin-masterdata-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
-                            dcc.Loading(
-                                html.Div(
-                                    id="admin-masterdata-table-wrapper",
-                                    style={"marginTop": "10px"},
-                                    children=[],
-                                ),
-                            ),
-                            dcc.Store(id="admin-masterdata-store", data=None),
-                        ],
-                    ),
-                    # ── Card 7: Data Source Status ──
-                    html.Div(
-                        className="admin-card",
-                        children=[
-                            html.H3("\U0001F4CB Data Source Status"),
-                            html.P("Check timestamps of all data source files to verify they are up to date."),
-                            html.Button("Scan Data Sources", id="admin-datasource-btn", n_clicks=0, className="admin-btn admin-btn--primary"),
-                            html.Span("", id="admin-datasource-status", style={"fontSize": "13px", "color": "#334155", "marginTop": "6px", "display": "block"}),
-                            dcc.Loading(
-                                html.Div(
-                                    id="admin-datasource-table-wrapper",
-                                    style={"marginTop": "10px"},
-                                    children=[],
-                                ),
-                            ),
-                        ],
-                    ),
-                ],
+                children=[demand_assumption_tab, overview_tab, drill_tab, data_validation_tab, production_data_tab],
             ),
         ],
     )
 
 
 def register_callbacks(app: Dash, cfg: AppConfig) -> None:
-
-    # ── unified refresh + pipeline progress callback ──────────────
     @app.callback(
         Output("data-store", "data"),
         Output("details-version-store", "data"),
-        Output("manual-refresh-status", "children"),
-        Output("pipeline-progress-interval", "disabled"),
-        Output("pipeline-progress-container", "style"),
-        Output("pipeline-progress-fill", "style"),
-        Output("pipeline-progress-pct", "children"),
-        Output("pipeline-progress-text", "children"),
-        Output("manual-refresh-btn", "disabled"),
         Input("refresh-interval", "n_intervals"),
-        Input("manual-refresh-btn", "n_clicks"),
-        Input("pipeline-progress-interval", "n_intervals"),
-        State("refresh-scope-dropdown", "value"),
-        State("data-store", "data"),
-        prevent_initial_call=True,
     )
-    def refresh_data(n_intervals, n_clicks, progress_ticks, scope, existing_data):
-        from dash import ctx
-
-        trigger = ctx.triggered_id
-        _FILL_BASE = {
-            "height": "100%",
-            "backgroundColor": "#3b82f6",
-            "borderRadius": "4px",
-            "transition": "width 0.4s ease",
-        }
-        _HIDE = {"display": "none", "width": "100%"}
-        _SHOW = {"display": "block", "width": "100%"}
-
-        # ── 1) Manual click → launch pipeline subprocess ──
-        if trigger == "manual-refresh-btn":
-            group = scope or "all"
-            _start_pipeline_subprocess(group)
-            label = REFRESH_GROUPS.get(group, {}).get("label", group)
-            ts = datetime.now().strftime("%H:%M:%S")
-            return (
-                dash.no_update,                        # data-store (unchanged while running)
-                dash.no_update,                        # details-version-store
-                f"⏳ Pipeline started at {ts} ({label})",
-                False,                                 # enable progress-interval
-                _SHOW,                                 # show progress container
-                {**_FILL_BASE, "width": "5%"},         # initial fill
-                "0%",                                  # pct label
-                f"Preparing {label} …",                # text
-                True,                                  # disable button while running
-            )
-
-        # ── 2) Progress polling tick ──
-        if trigger == "pipeline-progress-interval":
-            progress = _read_pipeline_progress()
-
-            if progress is None:
-                return (
-                    dash.no_update, dash.no_update, dash.no_update,
-                    False, _SHOW,
-                    {**_FILL_BASE, "width": "5%"}, "…",
-                    "Waiting for pipeline to start …",
-                    True,
-                )
-
-            status = progress.get("status", "unknown")
-            done = progress.get("stages_done", 0)
-            total = max(progress.get("stages_total", 1), 1)
-            pct = int(done / total * 100)
-            current_label = progress.get("current_stage_label", "")
-
-            if status == "running":
-                return (
-                    dash.no_update, dash.no_update, dash.no_update,
-                    False, _SHOW,
-                    {**_FILL_BASE, "width": f"{max(pct, 5)}%"},
-                    f"{pct}%",
-                    f"Running: {current_label} ({done}/{total})",
-                    True,
-                )
-
-            if status == "completed":
-                # Pipeline finished → reload data from new CSVs
-                bundle = load_data_bundle(cfg)
-                _write_data_version()  # notify all browsers
-                ts = datetime.now().strftime("%H:%M:%S")
-                completed_stages = progress.get("completed_stages", [])
-                labels = ", ".join(
-                    REFRESH_GROUPS.get(s, {}).get("label", s) for s in completed_stages
-                )
-                return (
-                    bundle,
-                    {"version": bundle.get("request_details_version")},
-                    f"✓ Pipeline completed at {ts} — {labels}",
-                    True,                              # stop polling
-                    _HIDE,                             # hide progress bar
-                    {**_FILL_BASE, "width": "100%"},
-                    "100%",
-                    "",
-                    False,                             # re-enable button
-                )
-
-            if status == "error":
-                error_msg = progress.get("error_message", "Unknown error")
-                failed = progress.get("current_stage_label", "")
-                ts = datetime.now().strftime("%H:%M:%S")
-                return (
-                    dash.no_update, dash.no_update,
-                    f"✗ Pipeline failed at {ts} ({failed}): {error_msg}",
-                    True,                              # stop polling
-                    _HIDE,
-                    {**_FILL_BASE, "width": "0%", "backgroundColor": "#ef4444"},
-                    "",
-                    "",
-                    False,
-                )
-
-            # unknown status – keep polling
-            return (
-                dash.no_update, dash.no_update, dash.no_update,
-                False, _SHOW,
-                {**_FILL_BASE, "width": "5%"}, "…",
-                "Checking pipeline …",
-                True,
-            )
-
-        # ── 3) Auto-refresh (15-min interval) → just reload CSVs ──
+    def refresh_data(_):
         bundle = load_data_bundle(cfg)
-        ts = datetime.now().strftime("%H:%M:%S")
-        return (
-            bundle,
-            {"version": bundle.get("request_details_version")},
-            f"Auto-refreshed at {ts}",
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-            dash.no_update,
-        )
-
-    # ── Data-version poll (detects server-side data changes) ────
-    @app.callback(
-        Output("data-store", "data", allow_duplicate=True),
-        Output("details-version-store", "data", allow_duplicate=True),
-        Output("data-version-store", "data", allow_duplicate=True),
-        Input("force-refresh-poll", "n_intervals"),
-        State("data-version-store", "data"),
-        prevent_initial_call=True,
-    )
-    def force_refresh_poll(n, client_version):
-        server_version = _read_data_version()
-        if not server_version or server_version == (client_version or ""):
-            raise PreventUpdate
-        bundle = load_data_bundle(cfg)
-        return bundle, {"version": bundle.get("request_details_version")}, server_version
+        return bundle, {"version": bundle.get("request_details_version")}
 
     @app.callback(
         Output("metric-total-msu", "children"),
@@ -4213,21 +3304,17 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
     @app.callback(
         Output("role-item-table", "columns"),
         Output("role-item-table", "data"),
+        Output("monthly-summary", "columns"),
+        Output("monthly-summary", "data"),
         Output("role-trend", "figure"),
         Output("pde-table", "columns"),
         Output("pde-table", "data"),
-        Output("pde-fg-table", "columns"),
-        Output("pde-fg-table", "data"),
         Output("drill-requester-filter", "options"),
         Output("drill-requester-filter", "value"),
         Output("drill-mrp-filter", "options"),
         Output("drill-mrp-filter", "value"),
-        Output("drill-item-text-filter", "options"),
-        Output("drill-item-text-filter", "value"),
         Output("role-item-mrp-summary", "columns"),
         Output("role-item-mrp-summary", "data"),
-        Output("role-item-mrp-total-summary", "columns"),
-        Output("role-item-mrp-total-summary", "data"),
         Output("hc-idp-monthly-table", "columns"),
         Output("hc-idp-monthly-table", "data"),
         Output("hc-idp-monthly-iya-table", "columns"),
@@ -4251,14 +3338,17 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("production-data-plant-table-1", "data"),
         Output("production-data-level-table-2", "columns"),
         Output("production-data-level-table-2", "data"),
+        Output("production-data-plant-table-3", "columns"),
+        Output("production-data-plant-table-3", "data"),
+        Output("production-data-level-table-4", "columns"),
+        Output("production-data-level-table-4", "data"),
         Input("data-store", "data"),
         Input("role-filter", "value"),
         Input("drill-role-filter", "value"),
         Input("drill-requester-filter", "value"),
         Input("drill-mrp-filter", "value"),
-        Input("drill-item-text-filter", "value"),
     )
-    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value):
+    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value):
         monthly_requester = pd.DataFrame(data.get("monthly_requester", []))
         monthly_level1 = pd.DataFrame(data.get("monthly_level1", []))
         hc_idp_monthly = pd.DataFrame(data.get("hc_idp_monthly", []))
@@ -4283,22 +3373,15 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             indicator for indicator in selected_mrp_indicators
             if any(option.get("value") == indicator for option in drill_mrp_options)
         ]
-        drill_item_text_options = build_item_text_options(request_details, selected_drill_role, valid_requesters, valid_mrp_indicators)
-        selected_item_texts = normalize_mrp_values(drill_item_text_value)
-        valid_item_texts = [
-            item for item in selected_item_texts
-            if any(option.get("value") == item for option in drill_item_text_options)
-        ]
+        summary_columns, summary_data = build_item_summary(monthly_requester, selected_role)
         role_fig = build_role_trend(monthly_requester, selected_role)
-        pde_columns, pde_records, pde_fg_columns, pde_fg_records = build_pde_tables(pde_alerts, request_details)
+        pde_columns, pde_records = build_pde_matrix(pde_alerts)
         drill_columns, drill_rows = build_role_item_project_summary(
             request_details,
             selected_drill_role,
             valid_requesters,
             valid_mrp_indicators,
-            valid_item_texts,
         )
-        drill_total_columns, drill_total_rows, drill_rows = extract_role_item_project_total_row(drill_columns, drill_rows)
         hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
         hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
         hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
@@ -4316,10 +3399,17 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
         td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
         production_group_1 = ["0386", "1864", "A868"]
+        production_group_2 = ["C810", "D352", "A673"]
         production_group_1_totals_after = {
             "0386": ("HP Total", ["0386", "C810"]),
             "1864": ("XQ Total", ["1864", "D352"]),
             "A868": ("TC Total", ["A868", "A673"]),
+        }
+        production_group_2_level = ["C810", "D352", "A673"]
+        production_group_2_totals_after = {
+            "C810": ("HP Total", ["0386", "C810"]),
+            "D352": ("XQ Total", ["1864", "D352"]),
+            "A673": ("TC Total", ["A868", "A673"]),
         }
         production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
             production_data_df,
@@ -4331,6 +3421,17 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             plant_order=production_group_1,
             include_segment_totals=True,
             segment_totals_after=production_group_1_totals_after,
+        )
+        production_plant_columns_2, production_plant_rows_2 = build_production_data_table_by_plant(
+            production_data_df,
+            plant_order=production_group_2,
+            include_segment_totals=False,
+        )
+        production_level_columns_2, production_level_rows_2 = build_production_data_table_by_plant_level(
+            production_data_by_level_df,
+            plant_order=production_group_2_level,
+            include_segment_totals=True,
+            segment_totals_after=production_group_2_totals_after,
         )
         level1_core_columns, level1_core_rows = build_first_level_summary(
             monthly_level1,
@@ -4347,21 +3448,17 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         return (
             table_columns,
             table_data,
+            summary_columns,
+            summary_data,
             role_fig,
             pde_columns,
             pde_records,
-            pde_fg_columns,
-            pde_fg_records,
             drill_requester_options,
             valid_requesters,
             drill_mrp_options,
             valid_mrp_indicators,
-            drill_item_text_options,
-            valid_item_texts,
             drill_columns,
             drill_rows,
-            drill_total_columns,
-            drill_total_rows,
             hc_idp_columns,
             hc_idp_rows,
             hc_idp_iya_columns,
@@ -4385,58 +3482,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             production_plant_rows_1,
             production_level_columns_1,
             production_level_rows_1,
-        )
-
-    # ── Production Dimension Detail callback ──────────────────────
-    @app.callback(
-        Output("prod-dim-filter-plant", "options"),
-        Output("prod-dim-filter-brand", "options"),
-        Output("prod-dim-filter-size", "options"),
-        Output("prod-dim-filter-variant", "options"),
-        Output("prod-dim-filter-prodline", "options"),
-        Output("prod-dim-filter-type", "options"),
-        Output("production-dim-detail-table", "columns"),
-        Output("production-dim-detail-table", "data"),
-        Input("data-store", "data"),
-        Input("prod-dim-group-by", "value"),
-        Input("prod-dim-filter-plant", "value"),
-        Input("prod-dim-filter-brand", "value"),
-        Input("prod-dim-filter-size", "value"),
-        Input("prod-dim-filter-variant", "value"),
-        Input("prod-dim-filter-prodline", "value"),
-        Input("prod-dim-filter-type", "value"),
-    )
-    def update_production_dimension_detail(
-        data, group_by, plant_filter, brand_filter, size_filter, variant_filter, prodline_filter, type_filter
-    ):
-        td_dim_df = pd.DataFrame((data or {}).get("td_demand_by_dimension", []))
-        dim_options = build_production_dimension_options(td_dim_df)
-        filters: Dict[str, List[str]] = {}
-        if plant_filter:
-            filters["Plant"] = plant_filter
-        if brand_filter:
-            filters["Brand"] = brand_filter
-        if size_filter:
-            filters["Size"] = size_filter
-        if variant_filter:
-            filters["Variant"] = variant_filter
-        if prodline_filter:
-            filters["Prod Line"] = prodline_filter
-        if type_filter:
-            filters["Type"] = type_filter
-        selected_group_by = group_by if group_by else ["Plant", "Brand", "Size", "Variant"]
-        dim_columns, dim_rows = build_production_dimension_table(
-            td_dim_df, selected_group_by, filters
-        )
-        return (
-            dim_options.get("Plant", []),
-            dim_options.get("Brand", []),
-            dim_options.get("Size", []),
-            dim_options.get("Variant", []),
-            dim_options.get("Prod Line", []),
-            dim_options.get("Type", []),
-            dim_columns,
-            dim_rows,
+            production_plant_columns_2,
+            production_plant_rows_2,
+            production_level_columns_2,
+            production_level_rows_2,
         )
 
     @app.callback(
@@ -4551,12 +3600,11 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("drill-detail-table", "data"),
         Input("role-item-mrp-summary", "active_cell"),
         Input("details-version-store", "data"),
-        State("role-item-mrp-summary", "columns"),
         State("role-item-mrp-summary", "data"),
         State("role-item-mrp-summary", "derived_viewport_data"),
         State("drill-requester-filter", "value"),
     )
-    def update_drill_details(active_cell, _version_data, summary_columns, summary_rows, viewport_rows, drill_requester_value):
+    def update_drill_details(active_cell, _version_data, summary_rows, viewport_rows, drill_requester_value):
         details = load_request_details(cfg)
         default_columns = [{"name": field, "id": field} for field in DETAIL_VIEW_FIELDS]
         if not active_cell:
@@ -4581,42 +3629,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         mrp_indicator = selected_row.get("MRP Element Indicator") or ""
         selected_requesters = normalize_requester_values(drill_requester_value)
 
-        clicked_column = str(active_cell.get("column_id", "") or "").strip()
-        if not clicked_column and summary_columns:
-            col_index = active_cell.get("column")
-            if isinstance(col_index, int) and 0 <= col_index < len(summary_columns):
-                clicked_column = str(summary_columns[col_index].get("id", "") or "").strip()
-
-        def normalize_selected_month(value: str) -> Optional[str]:
-            text = str(value or "").strip()
-            if not text or text == TOTAL_LABEL:
-                return None
-            if re.fullmatch(r"\d{4}-\d{2}", text):
-                return text
-            if re.fullmatch(r"\d{4}-\d{1}", text):
-                year, month = text.split("-", 1)
-                return f"{year}-{int(month):02d}"
-            try:
-                period = pd.Period(text, freq="M")
-                return f"{period.year}-{period.month:02d}"
-            except Exception:
-                pass
-            parsed = pd.to_datetime(text, errors="coerce")
-            if pd.notna(parsed):
-                return parsed.strftime("%Y-%m")
-            return None
-
-        selected_month = normalize_selected_month(clicked_column)
-
         try:
-            columns, rows = build_modal_detail_rows(
-                details,
-                role,
-                item_text,
-                mrp_indicator,
-                selected_requesters,
-                selected_month,
-            )
+            columns, rows = build_modal_detail_rows(details, role, item_text, mrp_indicator, selected_requesters)
         except Exception:
             logging.exception("Failed to build drill detail rows: role=%s item=%s mrp=%s", role, item_text, mrp_indicator)
             return "加载明细失败，请稍后重试", [{"name": "错误", "id": "error"}], [{"error": "加载明细失败"}]
@@ -4624,8 +3638,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         role_title = ROLE_DISPLAY_MAP.get(str(role).strip(), str(role).strip())
         title_parts = [part for part in [role_title, item_text, mrp_indicator] if part]
         title = " / ".join(title_parts) if title_parts else "明细列表"
-        if selected_month:
-            title = f"{title} / {selected_month}"
         if not rows:
             return f"{title} · 暂无数据", columns or default_columns, rows
         return title, columns, rows
@@ -4668,433 +3680,16 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
 
         try:
             snapshot_dir, excel_file, exported_count = create_dashboard_snapshot(cfg)
-            status_text = f"Backup completed: {exported_count} tables saved to {snapshot_dir}"
-            return dash.no_update, status_text
-        except Exception as exc:
+            status_text = f"Backup completed: {snapshot_dir.name} ({exported_count} tables)"
+            return dcc.send_file(str(excel_file)), status_text
+        except Exception:
             logging.exception("Failed to create dashboard snapshot")
-            return dash.no_update, f"Backup failed: {exc}"
-
-
-def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
-    """Register all callbacks for the /admin page."""
-
-    # ── Login ──────────────────────────────────────────────────────
-    @app.callback(
-        Output("admin-session", "data"),
-        Output("admin-login-error", "children"),
-        Output("admin-login-box", "style"),
-        Output("admin-panel", "style"),
-        Input("admin-login-btn", "n_clicks"),
-        Input("admin-password-input", "n_submit"),
-        State("admin-password-input", "value"),
-        State("admin-session", "data"),
-        prevent_initial_call=True,
-    )
-    def admin_login(n_clicks, n_submit, password, session):
-        if session and session.get("authenticated"):
-            return dash.no_update, dash.no_update, {"display": "none"}, {"display": "block"}
-        if not password:
-            return dash.no_update, "Please enter a password.", dash.no_update, dash.no_update
-        if password == cfg.admin_password:
-            return {"authenticated": True}, "", {"display": "none"}, {"display": "block"}
-        return dash.no_update, "Incorrect password.", dash.no_update, dash.no_update
-
-    # ── Restore session on page load ──
-    @app.callback(
-        Output("admin-login-box", "style", allow_duplicate=True),
-        Output("admin-panel", "style", allow_duplicate=True),
-        Input("admin-session", "data"),
-        prevent_initial_call=True,
-    )
-    def admin_restore_session(session):
-        if session and session.get("authenticated"):
-            return {"display": "none"}, {"display": "block"}
-        return dash.no_update, dash.no_update
-
-    # ── Run Pipeline ──────────────────────────────────────────────
-    @app.callback(
-        Output("admin-pipeline-status", "children"),
-        Output("admin-pipeline-interval", "disabled"),
-        Output("admin-pipeline-progress", "style"),
-        Output("admin-run-pipeline-btn", "disabled"),
-        Input("admin-run-pipeline-btn", "n_clicks"),
-        State("admin-refresh-scope", "value"),
-        prevent_initial_call=True,
-    )
-    def admin_run_pipeline(n_clicks, scope):
-        if not n_clicks:
-            raise PreventUpdate
-        group = scope or "all"
-        _start_pipeline_subprocess(group)
-        label = REFRESH_GROUPS.get(group, {}).get("label", group)
-        ts = datetime.now().strftime("%H:%M:%S")
-        return (
-            f"\u23f3 Pipeline started at {ts} ({label})",
-            False,   # enable interval
-            {"marginTop": "10px", "display": "block"},
-            True,    # disable button
-        )
-
-    # ── Pipeline progress polling ─────────────────────────────────
-    @app.callback(
-        Output("admin-progress-fill", "style"),
-        Output("admin-progress-pct", "children"),
-        Output("admin-progress-text", "children"),
-        Output("admin-pipeline-status", "children", allow_duplicate=True),
-        Output("admin-pipeline-interval", "disabled", allow_duplicate=True),
-        Output("admin-pipeline-progress", "style", allow_duplicate=True),
-        Output("admin-run-pipeline-btn", "disabled", allow_duplicate=True),
-        Input("admin-pipeline-interval", "n_intervals"),
-        prevent_initial_call=True,
-    )
-    def admin_pipeline_progress(n_intervals):
-        _FILL_BASE = {
-            "width": "0%", "height": "100%",
-            "backgroundColor": "#3b82f6", "borderRadius": "4px",
-            "transition": "width 0.4s ease",
-        }
-        progress = _read_pipeline_progress()
-        if progress is None:
-            return (
-                {**_FILL_BASE, "width": "5%"}, "\u2026",
-                "Waiting for pipeline ...",
-                dash.no_update, False,
-                {"marginTop": "10px", "display": "block"}, True,
-            )
-
-        status = progress.get("status", "unknown")
-        done = progress.get("stages_done", 0)
-        total = max(progress.get("stages_total", 1), 1)
-        pct = int(done / total * 100)
-        current_label = progress.get("current_stage_label", "")
-
-        if status == "running":
-            return (
-                {**_FILL_BASE, "width": f"{max(pct, 5)}%"}, f"{pct}%",
-                f"Running: {current_label} ({done}/{total})",
-                dash.no_update, False,
-                {"marginTop": "10px", "display": "block"}, True,
-            )
-        if status == "completed":
-            ts = datetime.now().strftime("%H:%M:%S")
-            completed = progress.get("completed_stages", [])
-            labels = ", ".join(REFRESH_GROUPS.get(s, {}).get("label", s) for s in completed)
-            return (
-                {**_FILL_BASE, "width": "100%"}, "100%", "",
-                f"\u2713 Pipeline completed at {ts} \u2014 {labels}",
-                True,  # stop polling
-                {"marginTop": "10px", "display": "none"},
-                False,  # re-enable button
-            )
-        if status == "error":
-            error_msg = progress.get("error_message", "Unknown error")
-            ts = datetime.now().strftime("%H:%M:%S")
-            return (
-                {**_FILL_BASE, "width": "0%", "backgroundColor": "#ef4444"}, "", "",
-                f"\u2717 Pipeline failed at {ts}: {error_msg}",
-                True, {"marginTop": "10px", "display": "none"}, False,
-            )
-        return (
-            {**_FILL_BASE, "width": "5%"}, "\u2026", "Checking...",
-            dash.no_update, False,
-            {"marginTop": "10px", "display": "block"}, True,
-        )
-
-    # ── Refresh Data (no pipeline) ────────────────────────────────
-    @app.callback(
-        Output("admin-refresh-data-status", "children"),
-        Output("admin-refresh-data-btn", "disabled"),
-        Input("admin-refresh-data-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def admin_refresh_data(n_clicks):
-        if not n_clicks:
-            raise PreventUpdate
-        try:
-            bundle = load_data_bundle(cfg)
-            # Write data version so ALL connected dashboards detect and refresh
-            _write_data_version()
-            n_details = len(bundle.get("pde_alerts", []))
-            n_items = len(pd.DataFrame(bundle.get("monthly_item", []))["Item Text"].unique()) if bundle.get("monthly_item") else 0
-            ts = datetime.now().strftime("%H:%M:%S")
-            return f"\u2713 Data refreshed at {ts} \u2014 {n_items} items, {n_details} PDE alerts. All dashboards will update within seconds.", False
-        except Exception:
-            logging.exception("Failed to refresh data")
-            return "\u2717 Refresh failed, check server logs.", False
-
-    # ── Backup Snapshot ───────────────────────────────────────────
-    @app.callback(
-        Output("admin-backup-download", "data"),
-        Output("admin-backup-status", "children"),
-        Input("admin-backup-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def admin_backup(n_clicks):
-        if not n_clicks:
-            raise PreventUpdate
-        try:
-            snapshot_dir, excel_file, exported_count = create_dashboard_snapshot(cfg)
-            logging.info("Backup snapshot saved: %s (%d tables)", snapshot_dir, exported_count)
-            return dash.no_update, f"✓ Backup completed: {exported_count} tables saved to {snapshot_dir}"
-        except Exception as exc:
-            logging.exception("Failed to create dashboard snapshot")
-            return dash.no_update, f"✗ Backup failed: {exc}"
-
-    # ── Update & Restart ──────────────────────────────────────────
-    @app.callback(
-        Output("admin-update-status", "children"),
-        Output("admin-update-btn", "disabled"),
-        Input("admin-update-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def admin_update_restart(n_clicks):
-        if not n_clicks:
-            raise PreventUpdate
-
-        messages: List[str] = []
-
-        # Since update_and_start_matres.bat handles EVERYTHING
-        # (git pull → venv → pip → pipeline → start dashboard),
-        # we just need to launch it and exit.
-        messages.append("[restart] Launching update_and_start_matres.bat ...")
-        messages.append("A new CMD window will open. This page will stop responding.")
-        messages.append("Please wait ~2 minutes, then visit http://localhost:8050")
-
-        import threading
-
-        def _delayed_restart():
-            import time
-            time.sleep(2)
-
-            bat_path = _PROJECT_ROOT / "update_and_start_matres.bat"
-            logging.info("Restart: launching %s", bat_path)
-
-            if sys.platform == "win32":
-                if not bat_path.exists():
-                    logging.error("update_and_start_matres.bat not found: %s", bat_path)
-                    return
-
-                # Use "start" command to open a NEW independent CMD window.
-                # "start" with empty title "" and the bat path opens it correctly.
-                # This is more reliable than os.startfile which uses cmd /c
-                # and may close immediately on errors.
-                subprocess.Popen(
-                    f'start "" "{bat_path.resolve()}"',
-                    shell=True,
-                    cwd=str(_PROJECT_ROOT),
-                )
-                logging.info("Bat launched. Exiting current process in 3s ...")
-                time.sleep(3)
-                os._exit(0)
-            else:
-                restart_cmd = [sys.executable] + sys.argv
-                os.execv(sys.executable, restart_cmd)
-
-        threading.Thread(target=_delayed_restart, daemon=False).start()
-        return "\n".join(messages), True
-
-    # ── Master Data Update ─────────────────────────────────────────
-    @app.callback(
-        Output("admin-masterdata-table-wrapper", "children"),
-        Output("admin-masterdata-status", "children"),
-        Output("admin-masterdata-store", "data"),
-        Input("admin-masterdata-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def admin_masterdata_scan(n_clicks):
-        if not n_clicks:
-            raise PreventUpdate
-        try:
-            # Import pipeline functions to build the report
-            sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
-            from matres_pipeline import PipelineConfig, build_master_data_update_report
-
-            pipeline_cfg = PipelineConfig.from_dict(
-                json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            )
-            report_df = build_master_data_update_report(pipeline_cfg)
-
-            if report_df.empty:
-                return (
-                    html.P("\u2705 No missing master data found. All materials are mapped.",
-                           style={"color": "#16a34a", "fontWeight": "600"}),
-                    "",
-                    None,
-                )
-
-            seg_count = int((report_df["Miss"] == "Seg \u7f3a\u5931").sum())
-            su_count = int((report_df["Miss"] == "SU Factor").sum())
-            status_text = f"Found {len(report_df)} items: {seg_count} Seg \u7f3a\u5931, {su_count} SU Factor"
-
-            table = DataTable(
-                id="admin-masterdata-result-table",
-                columns=[
-                    {"name": "Code", "id": "Code"},
-                    {"name": "Description", "id": "Description"},
-                    {"name": "Miss", "id": "Miss"},
-                    {"name": "Data Source", "id": "Data Source"},
-                ],
-                data=report_df.to_dict("records"),
-                style_header=PDE_STYLE_HEADER,
-                style_cell=PDE_STYLE_CELL,
-                style_data_conditional=[
-                    *PDE_STYLE_DATA_CONDITIONAL,
-                    {
-                        "if": {"filter_query": '{Miss} = "Seg \u7f3a\u5931"', "column_id": "Miss"},
-                        "color": "#dc2626",
-                        "fontWeight": "700",
-                    },
-                    {
-                        "if": {"filter_query": '{Miss} = "SU Factor"', "column_id": "Miss"},
-                        "color": "#d97706",
-                        "fontWeight": "700",
-                    },
-                    {
-                        "if": {"filter_query": '{Data Source} contains "Production Data"', "column_id": "Data Source"},
-                        "color": "#2563eb",
-                    },
-                    {
-                        "if": {"filter_query": '{Data Source} contains "Demand Data"', "column_id": "Data Source"},
-                        "color": "#7c3aed",
-                    },
-                ],
-                style_cell_conditional=[
-                    {"if": {"column_id": "Code"}, "textAlign": "left", "minWidth": "100px", "width": "120px"},
-                    {"if": {"column_id": "Description"}, "textAlign": "left", "minWidth": "250px", "width": "400px"},
-                    {"if": {"column_id": "Miss"}, "textAlign": "center", "minWidth": "100px", "width": "120px"},
-                    {"if": {"column_id": "Data Source"}, "textAlign": "center", "minWidth": "140px", "width": "180px"},
-                ],
-                page_size=20,
-                sort_action="native",
-                filter_action="native",
-                style_table={"overflowX": "auto", "maxHeight": "500px", "overflowY": "auto"},
-            )
-
-            return table, status_text, report_df.to_dict("records")
-        except Exception:
-            logging.exception("Failed to scan master data")
-            return html.P("Scan failed. Check server logs.", style={"color": "#dc2626"}), "", None
-
-    @app.callback(
-        Output("admin-masterdata-download", "data"),
-        Input("admin-masterdata-export-btn", "n_clicks"),
-        State("admin-masterdata-store", "data"),
-        prevent_initial_call=True,
-    )
-    def admin_masterdata_export(n_clicks, store_data):
-        if not n_clicks or not store_data:
-            raise PreventUpdate
-        try:
-            report_df = pd.DataFrame(store_data)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_dir = cfg.processed_dir.parent / "history" / "master_data_reports"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            excel_path = out_dir / f"master_data_update_{timestamp}.xlsx"
-            with pd.ExcelWriter(str(excel_path), engine="openpyxl") as writer:
-                report_df.to_excel(writer, sheet_name="Missing Master Data", index=False)
-            return dcc.send_file(str(excel_path))
-        except Exception:
-            logging.exception("Failed to export master data report")
-            raise PreventUpdate
-
-    # ── Data Source Status ─────────────────────────────────────────
-    @app.callback(
-        Output("admin-datasource-table-wrapper", "children"),
-        Output("admin-datasource-status", "children"),
-        Input("admin-datasource-btn", "n_clicks"),
-        prevent_initial_call=True,
-    )
-    def admin_datasource_scan(n_clicks):
-        if not n_clicks:
-            raise PreventUpdate
-        try:
-            sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
-            from matres_pipeline import PipelineConfig, collect_data_source_status
-
-            pipeline_cfg = PipelineConfig.from_dict(
-                json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-            )
-            records = collect_data_source_status(pipeline_cfg)
-
-            if not records:
-                return (
-                    html.P("No data sources found.",
-                           style={"color": "#d97706", "fontWeight": "600"}),
-                    "",
-                )
-
-            ok_count = sum(1 for r in records if "OK" in r.get("Status", ""))
-            missing_count = sum(1 for r in records if "Missing" in r.get("Status", ""))
-            status_text = f"Scanned {len(records)} sources: {ok_count} OK, {missing_count} missing"
-
-            table = DataTable(
-                id="admin-datasource-result-table",
-                columns=[
-                    {"name": "Category", "id": "Category"},
-                    {"name": "Data Source", "id": "Data Source"},
-                    {"name": "File Name", "id": "File Name"},
-                    {"name": "Version Date", "id": "Version Date"},
-                    {"name": "Modified Time", "id": "Modified Time"},
-                    {"name": "Status", "id": "Status"},
-                ],
-                data=records,
-                style_header=PDE_STYLE_HEADER,
-                style_cell=PDE_STYLE_CELL,
-                style_data_conditional=[
-                    *PDE_STYLE_DATA_CONDITIONAL,
-                    {
-                        "if": {"filter_query": '{Status} contains "OK"'},
-                        "color": "#16a34a",
-                        "fontWeight": "600",
-                    },
-                    {
-                        "if": {"filter_query": '{Status} contains "Missing"'},
-                        "color": "#dc2626",
-                        "fontWeight": "700",
-                        "backgroundColor": "#fef2f2",
-                    },
-                    {
-                        "if": {"filter_query": '{Category} = "Pipeline Output"'},
-                        "color": "#6b7280",
-                        "fontSize": "12px",
-                    },
-                ],
-                style_cell_conditional=[
-                    {"if": {"column_id": "Category"}, "textAlign": "left", "minWidth": "130px", "width": "160px"},
-                    {"if": {"column_id": "Data Source"}, "textAlign": "left", "minWidth": "180px", "width": "220px"},
-                    {"if": {"column_id": "File Name"}, "textAlign": "left", "minWidth": "250px", "width": "350px"},
-                    {"if": {"column_id": "Version Date"}, "textAlign": "center", "minWidth": "100px", "width": "120px"},
-                    {"if": {"column_id": "Modified Time"}, "textAlign": "center", "minWidth": "160px", "width": "180px"},
-                    {"if": {"column_id": "Status"}, "textAlign": "center", "minWidth": "80px", "width": "100px"},
-                ],
-                page_size=25,
-                sort_action="native",
-                filter_action="native",
-                style_table={"overflowX": "auto", "maxHeight": "500px", "overflowY": "auto"},
-            )
-
-            return table, status_text
-        except Exception:
-            logging.exception("Failed to scan data sources")
-            return html.P("Scan failed. Check server logs.", style={"color": "#dc2626"}), ""
+            return dash.no_update, "Backup failed, please check server logs."
 
 
 def create_app() -> Dash:
     cfg = AppConfig.load(CONFIG_PATH)
-    app = Dash(
-        __name__,
-        title="Supply Protection Commander",
-        assets_folder=str(Path(__file__).parent / "assets"),
-        suppress_callback_exceptions=True,
-        url_base_pathname="/",
-    )
-
-    @app.server.route("/docs/user-guide", methods=["GET"])
-    def serve_user_guide() -> Response:
-        guide_path = _PROJECT_ROOT / "docs" / "user_guide.html"
-        if guide_path.exists():
-            return Response(guide_path.read_text(encoding="utf-8"), mimetype="text/html; charset=utf-8")
-        return Response("User guide not found.", status=404)
+    app = Dash(__name__, title="Supply Protection Commander", assets_folder=str(Path(__file__).parent / "assets"))
 
     @app.server.route("/mail-preview/latest", methods=["GET"])
     def mail_preview_latest() -> Response:
@@ -5133,59 +3728,8 @@ def create_app() -> Dash:
         else:
             logging.warning("MATRES_ALLOWED_SUBNETS was set but no valid subnet was parsed.")
 
-    # ── Pre-build both page layouts ──
-    dashboard_layout = build_layout(app, cfg)
-    admin_layout = build_admin_layout(cfg)
-
-    # ── Root layout with URL routing ──
-    app.layout = html.Div([
-        dcc.Location(id="url", refresh=False),
-        html.Div(id="page-content"),
-    ])
-
-    @app.callback(
-        Output("page-content", "children"),
-        Input("url", "pathname"),
-    )
-    def route_page(pathname):
-        if pathname == "/admin":
-            return admin_layout
-        return dashboard_layout
-
-    # Register all callbacks
+    app.layout = build_layout(app, cfg)
     register_callbacks(app, cfg)
-    register_admin_callbacks(app, cfg)
-
-    # ── Auto-run pipeline on restart if flag exists ──
-    flag_file = _PROJECT_ROOT / "data" / "processed" / ".run_pipeline_on_start"
-    if flag_file.exists():
-        try:
-            flag_file.unlink()
-            logging.info("Auto-running pipeline after restart ...")
-            _start_pipeline_subprocess("all")
-
-            # Monitor pipeline completion in the background and trigger
-            # a data-version write so all connected dashboards auto-refresh.
-            import threading as _threading
-
-            def _wait_and_notify():
-                import time as _time
-                for _ in range(600):  # up to ~10 minutes
-                    _time.sleep(1)
-                    progress = _read_pipeline_progress()
-                    if progress and progress.get("status") in ("completed", "error"):
-                        if progress["status"] == "completed":
-                            logging.info("Auto-pipeline completed. Writing data version to trigger refresh.")
-                            _write_data_version()
-                        else:
-                            logging.warning("Auto-pipeline finished with error: %s", progress.get("error_message"))
-                        return
-                logging.warning("Auto-pipeline monitor timed out after 600s.")
-
-            _threading.Thread(target=_wait_and_notify, daemon=True).start()
-        except Exception:
-            logging.exception("Failed to auto-run pipeline on start")
-
     return app
 
 

@@ -733,7 +733,7 @@
                 <div class="card">
                     <div class="card-icon" style="background:#dbeafe;">📊</div>
                     <h4>5 个分析页面</h4>
-                    <p>Demand Assumption、Supply Protection、Project Details、Demand Data、Production Data</p>
+                    <p>Demand Assumption、Production Data、Supply Protection、Project Details、Demand Data</p>
                 </div>
                 <div class="card">
                     <div class="card-icon" style="background:#dcfce7;">⚙️</div>
@@ -883,14 +883,14 @@
             <h3>操作方式</h3>
             <ol class="step-list">
                 <li><strong>选择 Role 筛选</strong> — 页面顶部的 Role 按钮：ALL / NI / On Going / Cross Region</li>
-                <li><strong>可选筛选</strong> — Requester Email 和 MRP Element Indicator 下拉筛选，支持多选和搜索</li>
+                <li><strong>可选筛选</strong> — Requester Email、MRP Element Indicator、Item Text 三个下拉筛选，均支持多选和搜索</li>
                 <li><strong>查看汇总</strong> — Role × Item × Project 交叉汇总表，支持分页（每页 10 条）、排序</li>
                 <li><strong>下钻明细</strong> — 点击汇总表中任意行，下方显示对应的物料明细</li>
                 <li><strong>导出明细</strong> — 点击"下载全部明细"按钮导出 Excel</li>
             </ol>
 
             <h4>Total 行说明</h4>
-            <p>汇总表下方有一个独立的 Total 行，显示跨所有分页的合计值（不受分页影响）。</p>
+            <p>汇总表下方有一个独立的 Total 行，显示跨所有分页的合计值（不受分页和排序影响，始终固定在底部）。</p>
         </div>
 
         <!-- ================================================================ -->
@@ -913,6 +913,9 @@
                 <span class="callout-icon">💡</span>
                 <div><strong>颜色含义</strong>：GAP &lt; 0 显示<span style="color:#dc2626;font-weight:700;">红色</span>（减少），GAP &gt; 0 显示<span style="color:#16a34a;font-weight:700;">绿色</span>（增加）。</div>
             </div>
+
+            <h4>单元格计算器</h4>
+            <p>在 Demand Data 和 Production Data 页面，可以使用 <strong>Ctrl+点击</strong>（Mac: Cmd+点击）多个表格单元格，右下角会自动弹出计算小工具，实时显示所选单元格数值的<strong>求和</strong>和<strong>已选数量</strong>。再次 Ctrl+点击已选单元格可取消选中，点击 ✕ 按钮清空所有选择。</p>
         </div>
 
         <!-- ================================================================ -->

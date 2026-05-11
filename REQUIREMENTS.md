@@ -291,13 +291,15 @@ Password-protected admin panel (password in `config/config.json` field `admin_pa
 	- Monthly summary and Past Due Alerts table.
 - `Project Details`
 	- Role × Item × Project summary with role selector.
-	- Searchable multi-select filters: `Requester Email` and `MRP Element Indicator`.
+	- Searchable multi-select filters: `Requester Email`, `MRP Element Indicator`, and `Item Text`.
+	- Total row is separated into a fixed summary row below the main table (unaffected by sorting).
 	- Drill-down detail table and full-detail export.
 - `Demand Data`
 	- TD version monthly comparison.
 	- Click GAP row to drill into `Level2 GAP Details` and `GAP Difference Details`.
 	- Supports export for both detail tables.
-- `Production Data` — organized in two sub-tabs:
+	- **Cell Calculator**: Ctrl+Click (Cmd+Click on Mac) multiple cells to see real-time sum in a floating widget.
+- `Production Data` — organized in two sub-tabs (positioned right after Demand Assumption):
 	- **Summary** sub-tab:
 		- `By Plant` and `By Plant / Level1 / Level2` tables.
 		- Current month split into `MTD`, `Left Production`, `Current Month`.
@@ -308,6 +310,7 @@ Password-protected admin panel (password in `config/config.json` field `admin_pa
 		- 6 filter dropdowns (Brand, Size, Variant, Plant, Lineup, Prod Line) with multi-select.
 		- Displays MTD, Left Production, Current Month Total, and future month columns (current month excluded).
 		- Total row appended at bottom.
+	- **Cell Calculator**: Ctrl+Click (Cmd+Click on Mac) multiple cells to see real-time sum in a floating widget.
 
 ## 12) Board Logic HTML Guide
 - A handover-ready HTML documentation is provided at:
