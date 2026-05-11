@@ -2496,6 +2496,226 @@ def build_td_gap_level2_table(
     return f"Level2 GAP Details - {month_name} ({month_col})", columns, records, style_data_conditional
 
 
+# ---------------------------------------------------------------------------
+# Brand Dimension GAP – summary table (left) & detail table (right)
+# ---------------------------------------------------------------------------
+
+_BRAND_DIM_COLS = ["Brand", "NI/Conversion", "Variant", "Size"]
+
+
+def build_td_gap_brand_summary_table(
+    active_cell: Dict[str, Any] | None,
+    table_rows: List[Dict[str, Any]] | None,
+    td_detail_df: pd.DataFrame,
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build a Brand-level summary of GAP for the selected month."""
+    month_col = ""
+    month_name = "Selected Month"
+    if active_cell and isinstance(active_cell.get("column_id"), str):
+        raw_month = str(active_cell.get("column_id")).strip()
+        if re.fullmatch(r"\d{4}-\d{2}", raw_month):
+            month_col = raw_month
+            try:
+                month_name = pd.Period(raw_month, freq="M").strftime("%b")
+            except Exception:
+                month_name = raw_month
+
+    columns = [
+        {"name": "Brand", "id": "Brand"},
+        {"name": "Current", "id": "Current"},
+        {"name": "Previous", "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+    style_data_conditional = list(PDE_STYLE_DATA_CONDITIONAL)
+    style_data_conditional.extend([
+        {"if": {"filter_query": "{GAP} < 0", "column_id": "GAP"}, "color": "#dc2626", "fontWeight": "700"},
+        {"if": {"filter_query": "{GAP} > 0", "column_id": "GAP"}, "color": "#16a34a", "fontWeight": "700"},
+        {"if": {"filter_query": '{Brand} = "Total"'}, "backgroundColor": "#eaf2ff", "fontWeight": "700"},
+    ])
+
+    if not table_rows or not active_cell:
+        return "Brand GAP Summary（请先点击上方 GAP 行）", columns, [], style_data_conditional
+    row_index = active_cell.get("row")
+    if row_index is None or row_index < 0 or row_index >= len(table_rows):
+        return "Brand GAP Summary（请先点击上方 GAP 行）", columns, [], style_data_conditional
+    if not re.fullmatch(r"\d{4}-\d{2}", month_col):
+        return "Brand GAP Summary（请选择 GAP 行中的月份列）", columns, [], style_data_conditional
+    selected_row = table_rows[row_index]
+    if str(selected_row.get("Version Group", "")).strip() != "Gap":
+        return "Brand GAP Summary（请选择 GAP 行中的月份列）", columns, [], style_data_conditional
+    if td_detail_df.empty or "Brand" not in td_detail_df.columns:
+        return "Brand GAP Summary（无 Brand 维度数据，请重跑 pipeline）", columns, [], style_data_conditional
+
+    month_df = td_detail_df[td_detail_df["Month"].astype(str) == month_col].copy()
+    if month_df.empty:
+        return f"Brand GAP Summary - {month_name} ({month_col})（无明细）", columns, [], style_data_conditional
+
+    for col in ["Current", "Previous", "Gap"]:
+        month_df[col] = pd.to_numeric(month_df[col], errors="coerce").fillna(0.0)
+
+    month_df["Brand"] = month_df["Brand"].fillna("").astype(str).str.strip()
+    month_df.loc[month_df["Brand"] == "", "Brand"] = "未映射"
+
+    # Only use Base + PP rows (exclude Total to avoid double-counting)
+    base_pp = month_df[month_df["Prod Line"].astype(str).isin(["Base", "PP"])]
+    grouped = base_pp.groupby("Brand", dropna=False)[["Current", "Previous", "Gap"]].sum(min_count=1).reset_index()
+    grouped["Gap Rounded"] = grouped["Gap"].round().astype(int)
+
+    current_version = str(month_df["Current Version"].iloc[0]) if "Current Version" in month_df.columns and not month_df.empty else "Current"
+    previous_version = str(month_df["Previous Version"].iloc[0]) if "Previous Version" in month_df.columns and not month_df.empty else "Previous"
+    columns = [
+        {"name": "Brand", "id": "Brand"},
+        {"name": current_version, "id": "Current"},
+        {"name": previous_version, "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+
+    grouped = grouped.sort_values("Brand")
+    records: List[Dict[str, Any]] = []
+    for _, row in grouped.iterrows():
+        records.append({
+            "Brand": str(row["Brand"]),
+            "Current": int(round(float(row["Current"]))),
+            "Previous": int(round(float(row["Previous"]))),
+            "GAP": int(row["Gap Rounded"]),
+        })
+    total_row = {
+        "Brand": "Total",
+        "Current": int(round(float(grouped["Current"].sum()))),
+        "Previous": int(round(float(grouped["Previous"].sum()))),
+        "GAP": int(round(float(grouped["Gap"].sum()))),
+    }
+    records.append(total_row)
+
+    return f"Brand GAP Summary - {month_name} ({month_col})", columns, records, style_data_conditional
+
+
+def build_td_gap_brand_detail_table(
+    active_cell: Dict[str, Any] | None,
+    table_rows: List[Dict[str, Any]] | None,
+    brand_active_cell: Dict[str, Any] | None,
+    brand_rows: List[Dict[str, Any]] | None,
+    td_detail_df: pd.DataFrame,
+    visible_dims: List[str] | None = None,
+) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build a Brand × NI/Conversion × Variant × Size detail table for the selected month."""
+    if visible_dims is None:
+        visible_dims = list(_BRAND_DIM_COLS)
+    # Ensure at least Brand is always shown
+    if not visible_dims:
+        visible_dims = ["Brand"]
+
+    month_col = ""
+    month_name = "Selected Month"
+    if active_cell and isinstance(active_cell.get("column_id"), str):
+        raw_month = str(active_cell.get("column_id")).strip()
+        if re.fullmatch(r"\d{4}-\d{2}", raw_month):
+            month_col = raw_month
+            try:
+                month_name = pd.Period(raw_month, freq="M").strftime("%b")
+            except Exception:
+                month_name = raw_month
+
+    dim_columns = [{"name": d, "id": d} for d in visible_dims]
+    value_columns = [
+        {"name": "Prod Line", "id": "Prod Line"},
+        {"name": "Current", "id": "Current"},
+        {"name": "Previous", "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+    columns = dim_columns + value_columns
+
+    style_data_conditional = list(PDE_STYLE_DATA_CONDITIONAL)
+    style_data_conditional.extend([
+        {"if": {"filter_query": "{GAP} < 0", "column_id": "GAP"}, "color": "#dc2626", "fontWeight": "700"},
+        {"if": {"filter_query": "{GAP} > 0", "column_id": "GAP"}, "color": "#16a34a", "fontWeight": "700"},
+    ])
+
+    if not table_rows or not active_cell:
+        return "Brand Dimension Detail（请先点击上方 GAP 行）", columns, [], style_data_conditional
+    row_index = active_cell.get("row")
+    if row_index is None or row_index < 0 or row_index >= len(table_rows):
+        return "Brand Dimension Detail（请先点击上方 GAP 行）", columns, [], style_data_conditional
+    if not re.fullmatch(r"\d{4}-\d{2}", month_col):
+        return "Brand Dimension Detail（请选择 GAP 行中的月份列）", columns, [], style_data_conditional
+    selected_row = table_rows[row_index]
+    if str(selected_row.get("Version Group", "")).strip() != "Gap":
+        return "Brand Dimension Detail（请选择 GAP 行中的月份列）", columns, [], style_data_conditional
+
+    needed_cols = ["Month", "Prod Line", "Current", "Previous", "Gap", "Brand"]
+    if td_detail_df.empty or any(c not in td_detail_df.columns for c in needed_cols):
+        return "Brand Dimension Detail（无维度数据，请重跑 pipeline）", columns, [], style_data_conditional
+
+    month_df = td_detail_df[td_detail_df["Month"].astype(str) == month_col].copy()
+    if month_df.empty:
+        return f"Brand Dimension Detail - {month_name} ({month_col})（无明细）", columns, [], style_data_conditional
+
+    for col in ["Current", "Previous", "Gap"]:
+        month_df[col] = pd.to_numeric(month_df[col], errors="coerce").fillna(0.0)
+
+    # Fill missing dimension values
+    for dc in _BRAND_DIM_COLS:
+        if dc in month_df.columns:
+            month_df[dc] = month_df[dc].fillna("").astype(str).str.strip()
+        else:
+            month_df[dc] = ""
+
+    # Only Base + PP
+    filtered = month_df[month_df["Prod Line"].astype(str).isin(["Base", "PP"])].copy()
+    if filtered.empty:
+        return f"Brand Dimension Detail - {month_name} ({month_col})（无明细）", columns, [], style_data_conditional
+
+    # Filter by selected Brand from summary table
+    selected_brand = ""
+    if brand_active_cell and brand_rows:
+        br_idx = brand_active_cell.get("row")
+        if isinstance(br_idx, int) and 0 <= br_idx < len(brand_rows):
+            selected_brand = str(brand_rows[br_idx].get("Brand", "")).strip()
+            if selected_brand and selected_brand != "Total":
+                filtered = filtered[filtered["Brand"] == selected_brand].copy()
+            else:
+                selected_brand = ""
+
+    # Group by visible dims + Prod Line
+    group_cols = [d for d in visible_dims if d in filtered.columns] + ["Prod Line"]
+    grouped = filtered.groupby(group_cols, dropna=False)[["Current", "Previous", "Gap"]].sum(min_count=1).reset_index()
+    grouped["Gap Rounded"] = grouped["Gap"].round().astype(int)
+    grouped = grouped[grouped["Gap Rounded"] != 0].copy()
+
+    if grouped.empty:
+        suffix = f" / {selected_brand}" if selected_brand else ""
+        return f"Brand Dimension Detail - {month_name} ({month_col}){suffix}（无差异）", columns, [], style_data_conditional
+
+    current_version = str(month_df["Current Version"].iloc[0]) if "Current Version" in month_df.columns and not month_df.empty else "Current"
+    previous_version = str(month_df["Previous Version"].iloc[0]) if "Previous Version" in month_df.columns and not month_df.empty else "Previous"
+    dim_columns = [{"name": d, "id": d} for d in visible_dims]
+    value_columns = [
+        {"name": "Prod Line", "id": "Prod Line"},
+        {"name": current_version, "id": "Current"},
+        {"name": previous_version, "id": "Previous"},
+        {"name": "GAP", "id": "GAP"},
+    ]
+    columns = dim_columns + value_columns
+
+    grouped["abs_gap"] = grouped["Gap"].abs()
+    sort_cols = ["abs_gap"] + [d for d in visible_dims if d in grouped.columns]
+    grouped = grouped.sort_values(sort_cols, ascending=[False] + [True] * len([d for d in visible_dims if d in grouped.columns]))
+
+    records: List[Dict[str, Any]] = []
+    for _, row in grouped.iterrows():
+        rec: Dict[str, Any] = {}
+        for d in visible_dims:
+            rec[d] = str(row.get(d, ""))
+        rec["Prod Line"] = str(row.get("Prod Line", ""))
+        rec["Current"] = int(round(float(row.get("Current", 0))))
+        rec["Previous"] = int(round(float(row.get("Previous", 0))))
+        rec["GAP"] = int(row.get("Gap Rounded", 0))
+        records.append(rec)
+
+    suffix = f" / {selected_brand}" if selected_brand else ""
+    return f"Brand Dimension Detail - {month_name} ({month_col}){suffix}", columns, records, style_data_conditional
+
+
 def normalize_requester_values(values: Any) -> List[str]:
     if values is None:
         return []
@@ -3537,6 +3757,114 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                             ),
                         ],
                     ),
+                    # ── Brand Dimension GAP Section ──
+                    html.Hr(style={"margin": "24px 0 12px 0", "borderColor": "#e2e8f0"}),
+                    html.Div(
+                        style={"marginBottom": "10px", "display": "flex", "alignItems": "center", "gap": "16px"},
+                        children=[
+                            html.H3("Brand Dimension GAP", style={"margin": "0"}),
+                            html.Label("显示维度：", style={"fontWeight": "600", "fontSize": "14px", "marginLeft": "20px"}),
+                            dcc.Checklist(
+                                id="brand-dim-checklist",
+                                options=[
+                                    {"label": "Brand", "value": "Brand"},
+                                    {"label": "NI/Conversion", "value": "NI/Conversion"},
+                                    {"label": "Variant", "value": "Variant"},
+                                    {"label": "Size", "value": "Size"},
+                                ],
+                                value=["Brand", "NI/Conversion", "Variant", "Size"],
+                                inline=True,
+                                style={"display": "flex", "gap": "14px", "fontSize": "14px"},
+                                inputStyle={"marginRight": "4px"},
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        style={
+                            "display": "grid",
+                            "gridTemplateColumns": "1fr 2fr",
+                            "gap": "14px",
+                            "alignItems": "start",
+                        },
+                        children=[
+                            html.Div(
+                                style={"width": "100%", "minWidth": "0"},
+                                children=[
+                                    html.H4("Brand GAP Summary（请先点击上方 GAP 行）", id="td-gap-brand-summary-title"),
+                                    html.Div(
+                                        style={"marginBottom": "10px"},
+                                        children=[
+                                            html.Button("Export Brand Summary to Excel", id="td-gap-brand-summary-export-btn", n_clicks=0),
+                                            dcc.Download(id="td-gap-brand-summary-download"),
+                                        ],
+                                    ),
+                                    DataTable(
+                                        id="td-gap-brand-summary-table",
+                                        columns=[
+                                            {"name": "Brand", "id": "Brand"},
+                                            {"name": "Current", "id": "Current"},
+                                            {"name": "Previous", "id": "Previous"},
+                                            {"name": "GAP", "id": "GAP"},
+                                        ],
+                                        data=[],
+                                        style_header=PDE_STYLE_HEADER,
+                                        style_cell=PDE_STYLE_CELL,
+                                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                        style_cell_conditional=[
+                                            {"if": {"column_id": "Brand"}, "textAlign": "left", "minWidth": "100px", "width": "140px"},
+                                        ],
+                                        sort_action="native",
+                                        sort_mode="single",
+                                        page_size=15,
+                                        style_table={"overflowX": "auto", "width": "100%", "maxWidth": "100%"},
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                style={"width": "100%", "minWidth": "0"},
+                                children=[
+                                    html.H4("Brand Dimension Detail（请先点击上方 GAP 行）", id="td-gap-brand-detail-title"),
+                                    html.Div(
+                                        style={"marginBottom": "10px"},
+                                        children=[
+                                            html.Button("Export Brand Detail to Excel", id="td-gap-brand-detail-export-btn", n_clicks=0),
+                                            dcc.Download(id="td-gap-brand-detail-download"),
+                                        ],
+                                    ),
+                                    DataTable(
+                                        id="td-gap-brand-detail-table",
+                                        columns=[
+                                            {"name": "Brand", "id": "Brand"},
+                                            {"name": "NI/Conversion", "id": "NI/Conversion"},
+                                            {"name": "Variant", "id": "Variant"},
+                                            {"name": "Size", "id": "Size"},
+                                            {"name": "Prod Line", "id": "Prod Line"},
+                                            {"name": "Current", "id": "Current"},
+                                            {"name": "Previous", "id": "Previous"},
+                                            {"name": "GAP", "id": "GAP"},
+                                        ],
+                                        data=[],
+                                        style_header=PDE_STYLE_HEADER,
+                                        style_cell=PDE_STYLE_CELL,
+                                        style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
+                                        style_cell_conditional=[
+                                            {"if": {"column_id": "Brand"}, "textAlign": "left", "minWidth": "80px", "width": "100px"},
+                                            {"if": {"column_id": "NI/Conversion"}, "textAlign": "left", "minWidth": "120px", "width": "180px"},
+                                            {"if": {"column_id": "Variant"}, "textAlign": "left", "minWidth": "100px", "width": "160px"},
+                                            {"if": {"column_id": "Size"}, "textAlign": "left", "minWidth": "60px", "width": "80px"},
+                                            {"if": {"column_id": "Prod Line"}, "textAlign": "left", "minWidth": "70px", "width": "80px"},
+                                        ],
+                                        sort_action="native",
+                                        sort_mode="single",
+                                        filter_action="native",
+                                        sort_by=[{"column_id": "GAP", "direction": "asc"}],
+                                        page_size=20,
+                                        style_table={"overflowX": "auto", "width": "100%", "maxWidth": "100%"},
+                                    ),
+                                ],
+                            ),
+                        ],
+                    ),
                 ],
             ),
         ],
@@ -4544,6 +4872,102 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         filename = f"{safe_title}.xlsx"
 
         return dcc.send_data_frame(export_df.to_excel, filename, index=False, sheet_name="Level2 GAP")
+
+    # ── Brand Dimension GAP callbacks ──
+
+    @app.callback(
+        Output("td-gap-brand-summary-title", "children"),
+        Output("td-gap-brand-summary-table", "columns"),
+        Output("td-gap-brand-summary-table", "data"),
+        Output("td-gap-brand-summary-table", "style_data_conditional"),
+        Input("td-validation-table", "active_cell"),
+        Input("td-validation-table", "derived_viewport_data"),
+        Input("data-store", "data"),
+    )
+    def update_td_gap_brand_summary(active_cell, table_rows, data_store):
+        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+        title, columns, data, style_conditional = build_td_gap_brand_summary_table(
+            active_cell, table_rows or [], td_detail_df,
+        )
+        return title, columns, data, style_conditional
+
+    @app.callback(
+        Output("td-gap-brand-detail-title", "children"),
+        Output("td-gap-brand-detail-table", "columns"),
+        Output("td-gap-brand-detail-table", "data"),
+        Output("td-gap-brand-detail-table", "style_data_conditional"),
+        Input("td-validation-table", "active_cell"),
+        Input("td-validation-table", "derived_viewport_data"),
+        Input("td-gap-brand-summary-table", "active_cell"),
+        Input("td-gap-brand-summary-table", "derived_viewport_data"),
+        Input("brand-dim-checklist", "value"),
+        Input("data-store", "data"),
+    )
+    def update_td_gap_brand_detail(active_cell, table_rows, brand_active_cell, brand_rows, visible_dims, data_store):
+        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+        title, columns, data, style_conditional = build_td_gap_brand_detail_table(
+            active_cell, table_rows or [],
+            brand_active_cell, brand_rows or [],
+            td_detail_df,
+            visible_dims=visible_dims or ["Brand"],
+        )
+        return title, columns, data, style_conditional
+
+    @app.callback(
+        Output("td-gap-brand-summary-download", "data"),
+        Input("td-gap-brand-summary-export-btn", "n_clicks"),
+        State("td-gap-brand-summary-table", "columns"),
+        State("td-gap-brand-summary-table", "data"),
+        State("td-gap-brand-summary-title", "children"),
+        prevent_initial_call=True,
+    )
+    def export_td_gap_brand_summary(n_clicks, columns, rows, title):
+        if not n_clicks or not rows:
+            raise PreventUpdate
+        if not columns:
+            raise PreventUpdate
+        export_df = pd.DataFrame(rows)
+        column_ids = [str(col.get("id", "")) for col in columns if col.get("id")]
+        if not column_ids:
+            raise PreventUpdate
+        for col in column_ids:
+            if col not in export_df.columns:
+                export_df[col] = ""
+        export_df = export_df[column_ids]
+        rename_map = {str(col.get("id", "")): str(col.get("name", col.get("id", ""))) for col in columns}
+        export_df = export_df.rename(columns=rename_map)
+        safe_title = re.sub(r"[^0-9A-Za-z\-_]+", "_", str(title or "Brand_GAP_Summary")).strip("_")
+        if not safe_title:
+            safe_title = "Brand_GAP_Summary"
+        return dcc.send_data_frame(export_df.to_excel, f"{safe_title}.xlsx", index=False, sheet_name="Brand Summary")
+
+    @app.callback(
+        Output("td-gap-brand-detail-download", "data"),
+        Input("td-gap-brand-detail-export-btn", "n_clicks"),
+        State("td-gap-brand-detail-table", "columns"),
+        State("td-gap-brand-detail-table", "data"),
+        State("td-gap-brand-detail-title", "children"),
+        prevent_initial_call=True,
+    )
+    def export_td_gap_brand_detail(n_clicks, columns, rows, title):
+        if not n_clicks or not rows:
+            raise PreventUpdate
+        if not columns:
+            raise PreventUpdate
+        export_df = pd.DataFrame(rows)
+        column_ids = [str(col.get("id", "")) for col in columns if col.get("id")]
+        if not column_ids:
+            raise PreventUpdate
+        for col in column_ids:
+            if col not in export_df.columns:
+                export_df[col] = ""
+        export_df = export_df[column_ids]
+        rename_map = {str(col.get("id", "")): str(col.get("name", col.get("id", ""))) for col in columns}
+        export_df = export_df.rename(columns=rename_map)
+        safe_title = re.sub(r"[^0-9A-Za-z\-_]+", "_", str(title or "Brand_Dimension_Detail")).strip("_")
+        if not safe_title:
+            safe_title = "Brand_Dimension_Detail"
+        return dcc.send_data_frame(export_df.to_excel, f"{safe_title}.xlsx", index=False, sheet_name="Brand Detail")
 
     @app.callback(
         Output("drill-detail-title", "children"),

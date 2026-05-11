@@ -181,6 +181,13 @@ CLI usage:
 - `TD Version Monthly Comparison`: 9 months (current quarter + next 2 quarters).
 - `Level2 GAP Details` / `GAP Difference Details`: 9 months aligned with the same quarter window.
 
+### 10.14 Brand Dimension GAP Logic
+- Data source: `td_version_gap_details.csv`, which now includes Brand / NI/Conversion / Variant / Size columns (joined from the TD Report `Monthly` sheet via `material_key`).
+- **Brand GAP Summary**: groups Base + PP rows by Brand, sums Current / Previous / Gap, appends Total row.
+- **Brand Dimension Detail**: groups Base + PP rows by selected dimension columns (controlled by checklist) + Prod Line, filters to GAP ≠ 0, sorted by |GAP| descending.
+- Clicking a Brand in the summary table filters the detail table to that Brand only.
+- Unchecking a dimension in the checklist hides that column and re-aggregates data by the remaining dimensions.
+
 ### 10.12 Production Volume Filtering & Month Rules
 - Production Vol base filter keeps:
 	- `Categories / Members = 2.0Production/Receipts`
@@ -298,6 +305,11 @@ Password-protected admin panel (password in `config/config.json` field `admin_pa
 	- TD version monthly comparison.
 	- Click GAP row to drill into `Level2 GAP Details` and `GAP Difference Details`.
 	- Supports export for both detail tables.
+	- **Brand Dimension GAP** (below Level2/Detail tables):
+		- **Dimension Checklist**: toggle Brand / NI/Conversion / Variant / Size columns on/off (default: all four).
+		- **Brand GAP Summary** (left): aggregated Current / Previous / GAP by Brand (~6 rows + Total). Click a Brand row to filter the detail table.
+		- **Brand Dimension Detail** (right): grouped by visible dimensions + Prod Line, showing only rows with GAP ≠ 0. Supports native column filter, sort, and pagination.
+		- Both tables support Export to Excel.
 	- **Cell Calculator**: Ctrl+Click (Cmd+Click on Mac) multiple cells to see real-time sum in a floating widget.
 - `Production Data` — organized in two sub-tabs (positioned right after Demand Assumption):
 	- **Summary** sub-tab:

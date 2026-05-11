@@ -2334,6 +2334,18 @@ def build_td_validation_gap_details(root: Path, cfg: PipelineConfig) -> pd.DataF
         result["Level2"] = ""
     result["Level2"] = result["Level2"].fillna("").astype(str).str.strip()
     result.loc[result["Level2"] == "", "Level2"] = "未映射"
+
+    # Merge Brand / NI/Conversion / Variant / Size dimensions from TD report
+    td_dim_mapping = _read_td_dimension_mapping(root)
+    dim_cols_to_add = ["Brand", "NI/Conversion", "Variant", "Size"]
+    if not td_dim_mapping.empty:
+        td_dim_subset = td_dim_mapping[["material_key"] + [c for c in dim_cols_to_add if c in td_dim_mapping.columns]].copy()
+        result = result.merge(td_dim_subset, on="material_key", how="left")
+    for dc in dim_cols_to_add:
+        if dc not in result.columns:
+            result[dc] = ""
+        result[dc] = result[dc].fillna("").astype(str).str.strip()
+
     result = result.drop(columns=["material_key"])
 
     result["Current Version"] = str(current_date)

@@ -173,6 +173,13 @@ CLI 用法：
 - `TD Version Monthly Comparison`：9 个月（当前季度 + 后续 2 个季度）。
 - `Level2 GAP Details` / `GAP Difference Details`：同样按 9 个月窗口展示。
 
+### 10.14 Brand Dimension GAP 逻辑
+- 数据来源：`td_version_gap_details.csv`，现新增 Brand / NI/Conversion / Variant / Size 列（通过 `material_key` 从 TD 报表 `Monthly` 页签关联）。
+- **Brand GAP Summary**：对 Base + PP 行按 Brand 汇总 Current / Previous / Gap，末尾附加 Total 行。
+- **Brand Dimension Detail**：对 Base + PP 行按勾选的维度列 + Prod Line 分组，过滤 GAP ≠ 0，按 |GAP| 降序排列。
+- 点击左表某 Brand 行 → 右表自动筛选到该 Brand。
+- 取消勾选某维度 → 隐藏该列并按剩余维度重新聚合数据。
+
 ### 10.12 Production Vol 筛选与月份规则
 - Production Vol 基础筛选条件：
   - `Categories / Members = 2.0Production/Receipts`
@@ -289,6 +296,11 @@ CLI 用法：
   - `TD Version Monthly Comparison` 主表。
   - 点击 GAP 行后可查看 `Level2 GAP Details` 与 `GAP Difference Details`。
   - 两类明细都支持导出。
+  - **Brand Dimension GAP**（位于 Level2/Detail 下方）：
+    - **维度选择器（Checklist）**：可勾选/取消 Brand / NI/Conversion / Variant / Size 四列（默认全选）。
+    - **Brand GAP Summary**（左表）：按 Brand 汇总 Current / Previous / GAP（约 6 行 + Total）。点击某 Brand 行可联动筛选右表。
+    - **Brand Dimension Detail**（右表）：按勾选的维度 + Prod Line 分组，仅显示 GAP ≠ 0 的行。支持原生列筛选、排序与分页。
+    - 两张表均支持 Export to Excel。
   - **单元格计算器**：Ctrl+点击多个单元格可实时查看数值求和（右下角浮动小工具）。
 - `Production Data` — 分为两个子标签页（位于 Demand Assumption 之后）：
   - **Summary** 子标签页：
