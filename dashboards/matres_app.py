@@ -502,10 +502,12 @@ def _build_matrix_tooltip_data(
                     proj_agg[proj][0].add(owner)
                     proj_agg[proj] = (proj_agg[proj][0], proj_agg[proj][1] + msu)
                 lines = [f"**{current_role}** | {item_val} | {col_name}: **{cell_val}** MSU", ""]
+                lines.append("| Project | Owner | MSU |")
+                lines.append("|---|---|---|")
                 for proj, (owners, total_msu) in sorted(proj_agg.items(), key=lambda x: -x[1][1]):
                     owner_str = ", ".join(sorted(owners))
-                    lines.append(f"- {proj} | {owner_str} | {total_msu:,.1f} MSU")
-                tip_row[col_id] = {"value": "\n".join(lines[:12]), "type": "markdown"}
+                    lines.append(f"| {proj} | {owner_str} | {total_msu:,.1f} |")
+                tip_row[col_id] = {"value": "\n".join(lines[:15]), "type": "markdown"}
             else:
                 tip_row[col_id] = {
                     "value": f"**{current_role}** | {item_val}  \n{col_name}: **{cell_val}** MSU",
@@ -3349,7 +3351,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                     style_table={"overflowX": "auto"},
                                     tooltip_delay=2000,
                                     tooltip_duration=None,
-                                    css=[{"selector": ".dash-tooltip", "rule": "font-family: Century Gothic, Segoe UI, sans-serif; font-size: 13px; max-width: 400px;"}],
+                                    css=[{"selector": ".dash-tooltip", "rule": "font-family: Century Gothic, Segoe UI, sans-serif; font-size: 13px; max-width: 800px; width: max-content; white-space: nowrap;"}],
                                 )
                             ),
                             html.Div(
