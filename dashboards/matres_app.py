@@ -447,15 +447,43 @@ def format_month_label_slash(label: str) -> str:
 def _build_matrix_tooltip_data(
     columns: List[Dict[str, str]],
     data: List[Dict[str, Any]],
+    request_details: Optional[pd.DataFrame] = None,
 ) -> List[Dict[str, Any]]:
-    """Build tooltip_data for role-item-table. Each cell shows Role + Item Text + month + value."""
+    """Build tooltip_data for role-item-table showing project name, owner, and MSU."""
     tooltip_rows: List[Dict[str, Any]] = []
     month_col_ids = [c["id"] for c in columns if c["id"] not in ("Role", "Item Text", TOTAL_LABEL)]
+
+    # Build a lookup: (role_raw, item_text, month) -> list of (project, owner, msu)
+    detail_lookup: Dict[Tuple[str, str, str], List[Tuple[str, str, float]]] = {}
+    if request_details is not None and not request_details.empty:
+        rd = request_details.copy()
+        rd["requester_role"] = rd.get("requester_role", UNKNOWN_ROLE).fillna(UNKNOWN_ROLE)
+        rd["Item Text"] = rd.get("Item Text", "").fillna("").astype(str).str.strip()
+        rd["MRP Element Indicator"] = rd.get("MRP Element Indicator", "").fillna("").astype(str).str.strip()
+        rd["Requester Email"] = rd.get("Requester Email", "").fillna("").astype(str).str.strip()
+        rd["MSU"] = pd.to_numeric(rd.get("MSU", 0), errors="coerce").fillna(0)
+        if "availability_month" not in rd.columns:
+            rd["availability_month"] = pd.to_datetime(rd.get("Availability Date", pd.NaT), errors="coerce").dt.to_period("M").astype(str)
+        rd["availability_month"] = rd["availability_month"].astype(str).str.strip()
+        # Map raw role to display role for matching
+        for _, row in rd.iterrows():
+            role_raw = str(row["requester_role"]).strip()
+            role_display = ROLE_DISPLAY_MAP.get(role_raw, role_raw)
+            item = str(row["Item Text"]).strip()
+            month = str(row["availability_month"]).strip()
+            project = str(row["MRP Element Indicator"]).strip() or "N/A"
+            owner = str(row["Requester Email"]).strip() or "N/A"
+            msu = float(row["MSU"])
+            key = (role_display, item, month)
+            if key not in detail_lookup:
+                detail_lookup[key] = []
+            detail_lookup[key].append((project, owner, msu))
+
     # Track the current role for rows where Role is empty (continuation rows)
     current_role = ""
     for row in data:
         role_val = str(row.get("Role", "")).strip()
-        if role_val:
+        if role_val and role_val != TOTAL_LABEL:
             current_role = role_val
         item_val = str(row.get("Item Text", "")).strip()
         tip_row: Dict[str, Any] = {}
@@ -464,10 +492,25 @@ def _build_matrix_tooltip_data(
         for col_id in month_col_ids:
             cell_val = str(row.get(col_id, "-"))
             col_name = next((c["name"] for c in columns if c["id"] == col_id), col_id)
-            tip_row[col_id] = {
-                "value": f"**{current_role}** | {item_val}  \n{col_name}: **{cell_val}** MSU",
-                "type": "markdown",
-            }
+            details = detail_lookup.get((current_role, item_val, col_id), [])
+            if details:
+                # Aggregate by project
+                proj_agg: Dict[str, Tuple[set, float]] = {}
+                for proj, owner, msu in details:
+                    if proj not in proj_agg:
+                        proj_agg[proj] = (set(), 0.0)
+                    proj_agg[proj][0].add(owner)
+                    proj_agg[proj] = (proj_agg[proj][0], proj_agg[proj][1] + msu)
+                lines = [f"**{current_role}** | {item_val} | {col_name}: **{cell_val}** MSU", ""]
+                for proj, (owners, total_msu) in sorted(proj_agg.items(), key=lambda x: -x[1][1]):
+                    owner_str = ", ".join(sorted(owners))
+                    lines.append(f"- {proj} | {owner_str} | {total_msu:,.1f} MSU")
+                tip_row[col_id] = {"value": "\n".join(lines[:12]), "type": "markdown"}
+            else:
+                tip_row[col_id] = {
+                    "value": f"**{current_role}** | {item_val}  \n{col_name}: **{cell_val}** MSU",
+                    "type": "markdown",
+                }
         total_val = str(row.get(TOTAL_LABEL, "-"))
         tip_row[TOTAL_LABEL] = {
             "value": f"**{current_role}** | {item_val}  \nTotal: **{total_val}** MSU",
@@ -3461,25 +3504,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                             ),
                         ],
                     ),
-                    html.Div(
-                        style={"margin": "10px 0", "maxWidth": "400px"},
-                        children=[
-                            dcc.Input(
-                                id="drill-fuzzy-search",
-                                type="text",
-                                placeholder="关键词模糊搜索（Role / Item Text / MRP Indicator）",
-                                debounce=True,
-                                style={
-                                    "width": "100%",
-                                    "padding": "8px 12px",
-                                    "border": "1px solid #d6e2f0",
-                                    "borderRadius": "6px",
-                                    "fontSize": "14px",
-                                    "fontFamily": GLOBAL_FONT_FAMILY,
-                                },
-                            ),
-                        ],
-                    ),
                     dcc.Loading(
                         html.Div(
                             className="drill-table-wrapper",
@@ -3500,7 +3524,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 page_size=10,
                                 style_table={"overflowX": "auto"},
                                 sort_action="native",
-                                filter_action="none",
+                                filter_action="native",
                             )
                         )
                     ),
@@ -4663,9 +4687,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Input("drill-requester-filter", "value"),
         Input("drill-mrp-filter", "value"),
         Input("drill-item-text-filter", "value"),
-        Input("drill-fuzzy-search", "value"),
     )
-    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value, drill_fuzzy_search):
+    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value):
         monthly_requester = pd.DataFrame(data.get("monthly_requester", []))
         monthly_level1 = pd.DataFrame(data.get("monthly_level1", []))
         hc_idp_monthly = pd.DataFrame(data.get("hc_idp_monthly", []))
@@ -4678,8 +4701,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         selected_role = role_value or ROLE_ALL_VALUE
         table_columns, table_data = build_monthly_matrix(monthly_requester, selected_role)
 
-        # Generate tooltip data for role-item-table
-        table_tooltip_data = _build_matrix_tooltip_data(table_columns, table_data)
+        # Generate tooltip data for role-item-table with project/owner/MSU details
+        table_tooltip_data = _build_matrix_tooltip_data(table_columns, table_data, request_details)
 
         selected_drill_role = drill_role_value or ROLE_ALL_VALUE
         drill_requester_options = build_requester_email_options(request_details, selected_drill_role)
@@ -4710,17 +4733,6 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             valid_item_texts,
         )
         drill_total_columns, drill_total_rows, drill_rows = extract_role_item_project_total_row(drill_columns, drill_rows)
-
-        # Apply fuzzy search filter to drill rows
-        fuzzy_keyword = (drill_fuzzy_search or "").strip()
-        if fuzzy_keyword:
-            keyword_lower = fuzzy_keyword.lower()
-            drill_rows = [
-                row for row in drill_rows
-                if keyword_lower in str(row.get("Role", "")).lower()
-                or keyword_lower in str(row.get("Item Text", "")).lower()
-                or keyword_lower in str(row.get("MRP Element Indicator", "")).lower()
-            ]
 
         hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
         hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
