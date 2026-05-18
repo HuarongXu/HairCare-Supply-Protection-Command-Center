@@ -444,6 +444,39 @@ def format_month_label_slash(label: str) -> str:
         return str(label)
 
 
+def _build_matrix_tooltip_data(
+    columns: List[Dict[str, str]],
+    data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build tooltip_data for role-item-table. Each cell shows Role + Item Text + month + value."""
+    tooltip_rows: List[Dict[str, Any]] = []
+    month_col_ids = [c["id"] for c in columns if c["id"] not in ("Role", "Item Text", TOTAL_LABEL)]
+    # Track the current role for rows where Role is empty (continuation rows)
+    current_role = ""
+    for row in data:
+        role_val = str(row.get("Role", "")).strip()
+        if role_val:
+            current_role = role_val
+        item_val = str(row.get("Item Text", "")).strip()
+        tip_row: Dict[str, Any] = {}
+        tip_row["Role"] = {"value": f"**{current_role}**", "type": "markdown"}
+        tip_row["Item Text"] = {"value": f"**{item_val}**", "type": "markdown"}
+        for col_id in month_col_ids:
+            cell_val = str(row.get(col_id, "-"))
+            col_name = next((c["name"] for c in columns if c["id"] == col_id), col_id)
+            tip_row[col_id] = {
+                "value": f"**{current_role}** | {item_val}  \n{col_name}: **{cell_val}** MSU",
+                "type": "markdown",
+            }
+        total_val = str(row.get(TOTAL_LABEL, "-"))
+        tip_row[TOTAL_LABEL] = {
+            "value": f"**{current_role}** | {item_val}  \nTotal: **{total_val}** MSU",
+            "type": "markdown",
+        }
+        tooltip_rows.append(tip_row)
+    return tooltip_rows
+
+
 def build_monthly_matrix(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[Dict]]:
     columns = [
         {"name": "Role", "id": "Role"},
@@ -584,6 +617,23 @@ def build_monthly_matrix(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[
             row[TOTAL_LABEL] = format_value(row_total)
             records.append(row)
             role_has_rows = True
+
+        # Add role subtotal row
+        if role_has_rows:
+            role_subtotal_label = f"{display_role(current_role)} Total"
+            role_month_totals = (
+                role_subset.groupby("availability_month_norm", dropna=False)["total_msu"]
+                .sum(min_count=1)
+                if not role_subset.empty
+                else pd.Series(dtype=float)
+            )
+            role_total_value = role_month_totals.sum() if not role_month_totals.empty else 0
+            if pd.notna(role_total_value) and float(role_total_value) > 0:
+                subtotal_record: Dict[str, Any] = {"Role": "", "Item Text": role_subtotal_label}
+                for month in months:
+                    subtotal_record[month] = format_value(role_month_totals.get(month, 0))
+                subtotal_record[TOTAL_LABEL] = format_value(role_total_value)
+                records.append(subtotal_record)
 
     totals = (
         scope_df.groupby("availability_month_norm", dropna=False)["total_msu"].sum(min_count=1)
@@ -3242,13 +3292,21 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                             "fontWeight": "700",
                                             "backgroundColor": "#eaf2ff",
                                         },
+                                        {
+                                            "if": {"filter_query": '{Item Text} contains "Total"'},
+                                            "fontWeight": "700",
+                                            "backgroundColor": "#f0f5ff",
+                                        },
                                     ],
                                     style_cell_conditional=[
                                         {"if": {"column_id": "Role"}, "textAlign": "left"},
                                         {"if": {"column_id": "Item Text"}, "textAlign": "left"},
                                     ],
-                                    page_size=20,
+                                    page_size=30,
                                     style_table={"overflowX": "auto"},
+                                    tooltip_delay=2000,
+                                    tooltip_duration=None,
+                                    css=[{"selector": ".dash-tooltip", "rule": "font-family: Century Gothic, Segoe UI, sans-serif; font-size: 13px; max-width: 400px;"}],
                                 )
                             ),
                             html.Div(
@@ -3400,6 +3458,25 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                         searchable=True,
                                     ),
                                 ],
+                            ),
+                        ],
+                    ),
+                    html.Div(
+                        style={"margin": "10px 0", "maxWidth": "400px"},
+                        children=[
+                            dcc.Input(
+                                id="drill-fuzzy-search",
+                                type="text",
+                                placeholder="关键词模糊搜索（Role / Item Text / MRP Indicator）",
+                                debounce=True,
+                                style={
+                                    "width": "100%",
+                                    "padding": "8px 12px",
+                                    "border": "1px solid #d6e2f0",
+                                    "borderRadius": "6px",
+                                    "fontSize": "14px",
+                                    "fontFamily": GLOBAL_FONT_FAMILY,
+                                },
                             ),
                         ],
                     ),
@@ -4541,6 +4618,7 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
     @app.callback(
         Output("role-item-table", "columns"),
         Output("role-item-table", "data"),
+        Output("role-item-table", "tooltip_data"),
         Output("role-trend", "figure"),
         Output("pde-table", "columns"),
         Output("pde-table", "data"),
@@ -4585,8 +4663,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Input("drill-requester-filter", "value"),
         Input("drill-mrp-filter", "value"),
         Input("drill-item-text-filter", "value"),
+        Input("drill-fuzzy-search", "value"),
     )
-    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value):
+    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value, drill_fuzzy_search):
         monthly_requester = pd.DataFrame(data.get("monthly_requester", []))
         monthly_level1 = pd.DataFrame(data.get("monthly_level1", []))
         hc_idp_monthly = pd.DataFrame(data.get("hc_idp_monthly", []))
@@ -4596,8 +4675,12 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         historical_shipment = pd.DataFrame(data.get("historical_shipment", []))
         pde_alerts = pd.DataFrame(data.get("pde_alerts", []))
         request_details = load_request_details(cfg)
-        table_columns, table_data = build_monthly_matrix(monthly_requester, ROLE_ALL_VALUE)
         selected_role = role_value or ROLE_ALL_VALUE
+        table_columns, table_data = build_monthly_matrix(monthly_requester, selected_role)
+
+        # Generate tooltip data for role-item-table
+        table_tooltip_data = _build_matrix_tooltip_data(table_columns, table_data)
+
         selected_drill_role = drill_role_value or ROLE_ALL_VALUE
         drill_requester_options = build_requester_email_options(request_details, selected_drill_role)
         selected_requesters = normalize_requester_values(drill_requester_value)
@@ -4627,6 +4710,18 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             valid_item_texts,
         )
         drill_total_columns, drill_total_rows, drill_rows = extract_role_item_project_total_row(drill_columns, drill_rows)
+
+        # Apply fuzzy search filter to drill rows
+        fuzzy_keyword = (drill_fuzzy_search or "").strip()
+        if fuzzy_keyword:
+            keyword_lower = fuzzy_keyword.lower()
+            drill_rows = [
+                row for row in drill_rows
+                if keyword_lower in str(row.get("Role", "")).lower()
+                or keyword_lower in str(row.get("Item Text", "")).lower()
+                or keyword_lower in str(row.get("MRP Element Indicator", "")).lower()
+            ]
+
         hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
         hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
         hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
@@ -4675,6 +4770,7 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         return (
             table_columns,
             table_data,
+            table_tooltip_data,
             role_fig,
             pde_columns,
             pde_records,
