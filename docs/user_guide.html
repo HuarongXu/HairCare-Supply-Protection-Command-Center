@@ -884,13 +884,14 @@
             <ol class="step-list">
                 <li><strong>选择 Role 筛选</strong> — 页面顶部的 Role 按钮：ALL / NI / On Going / Cross Region</li>
                 <li><strong>可选筛选</strong> — Requester Email、MRP Element Indicator、Item Text 三个下拉筛选，均支持多选和搜索</li>
-                <li><strong>查看汇总</strong> — Role × Item × Project 交叉汇总表，支持分页（每页 10 条）、排序</li>
+                <li><strong>关键词模糊搜索</strong> — 在筛选栏最右侧输入关键词，对 Role / Item Text / MRP Element Indicator 进行模糊匹配（不区分大小写）</li>
+                <li><strong>查看汇总</strong> — Role × Item × Project 交叉汇总表，支持分页（每页 10 条）、排序、列头原生筛选</li>
                 <li><strong>下钻明细</strong> — 点击汇总表中任意行，下方显示对应的物料明细</li>
                 <li><strong>导出明细</strong> — 点击"下载全部明细"按钮导出 Excel</li>
             </ol>
 
             <h4>Total 行说明</h4>
-            <p>汇总表下方有一个独立的 Total 行，显示跨所有分页的合计值（不受分页和排序影响，始终固定在底部）。</p>
+            <p>汇总表下方有一个独立的 Total 行，显示跨所有分页的合计值（不受分页和排序影响，始终固定在底部）。模糊搜索时，Total 行会自动重新计算为筛选后结果的合计。</p>
         </div>
 
         <!-- ================================================================ -->

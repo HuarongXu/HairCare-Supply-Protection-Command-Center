@@ -3473,7 +3473,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                             ),
                             html.P("点击任意组合即可查看对应的所有物料请求明细"),
                             html.Div(
-                                style={"display": "grid", "gridTemplateColumns": "minmax(300px, 1fr) minmax(260px, 0.8fr) minmax(220px, 0.7fr)", "gap": "10px", "maxWidth": "1100px"},
+                                style={"display": "grid", "gridTemplateColumns": "minmax(280px, 1fr) minmax(240px, 0.8fr) minmax(200px, 0.7fr) minmax(200px, 0.7fr)", "gap": "10px", "maxWidth": "1400px"},
                                 children=[
                                     dcc.Dropdown(
                                         id="drill-requester-filter",
@@ -3501,6 +3501,20 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                         multi=True,
                                         clearable=True,
                                         searchable=True,
+                                    ),
+                                    dcc.Input(
+                                        id="drill-fuzzy-search",
+                                        type="text",
+                                        placeholder="关键词模糊搜索",
+                                        debounce=True,
+                                        style={
+                                            "height": "36px",
+                                            "padding": "0 12px",
+                                            "border": "1px solid #d6e2f0",
+                                            "borderRadius": "4px",
+                                            "fontSize": "14px",
+                                            "fontFamily": GLOBAL_FONT_FAMILY,
+                                        },
                                     ),
                                 ],
                             ),
@@ -4689,8 +4703,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Input("drill-requester-filter", "value"),
         Input("drill-mrp-filter", "value"),
         Input("drill-item-text-filter", "value"),
+        Input("drill-fuzzy-search", "value"),
     )
-    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value):
+    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value, drill_fuzzy_search):
         monthly_requester = pd.DataFrame(data.get("monthly_requester", []))
         monthly_level1 = pd.DataFrame(data.get("monthly_level1", []))
         hc_idp_monthly = pd.DataFrame(data.get("hc_idp_monthly", []))
@@ -4735,6 +4750,37 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             valid_item_texts,
         )
         drill_total_columns, drill_total_rows, drill_rows = extract_role_item_project_total_row(drill_columns, drill_rows)
+
+        # Apply fuzzy keyword filter to both drill rows and total row
+        fuzzy_keyword = (drill_fuzzy_search or "").strip()
+        if fuzzy_keyword:
+            keyword_lower = fuzzy_keyword.lower()
+            drill_rows = [
+                row for row in drill_rows
+                if keyword_lower in str(row.get("Role", "")).lower()
+                or keyword_lower in str(row.get("Item Text", "")).lower()
+                or keyword_lower in str(row.get("MRP Element Indicator", "")).lower()
+            ]
+            # Recalculate total row from filtered drill_rows
+            if drill_rows:
+                month_cols = [c["id"] for c in drill_columns if c["id"] not in ("Role", "Item Text", "MRP Element Indicator", TOTAL_LABEL)]
+                new_total: Dict[str, Any] = {"Role": TOTAL_LABEL, "Item Text": TOTAL_LABEL, "MRP Element Indicator": "", "__role_raw": TOTAL_LABEL}
+                for col_id in month_cols:
+                    col_sum = sum(
+                        float(str(r.get(col_id, "0")).replace(",", "").replace("-", "0"))
+                        for r in drill_rows
+                        if str(r.get(col_id, "-")) not in ("-", "")
+                    )
+                    new_total[col_id] = f"{col_sum:,.1f}" if col_sum else "-"
+                grand_total = sum(
+                    float(str(r.get(TOTAL_LABEL, "0")).replace(",", "").replace("-", "0"))
+                    for r in drill_rows
+                    if str(r.get(TOTAL_LABEL, "-")) not in ("-", "")
+                )
+                new_total[TOTAL_LABEL] = f"{grand_total:,.1f}" if grand_total else "-"
+                drill_total_rows = [new_total]
+            else:
+                drill_total_rows = []
 
         hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
         hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)

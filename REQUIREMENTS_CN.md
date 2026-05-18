@@ -290,7 +290,8 @@ CLI 用法：
 - `Project Details`
   - `Role × Item × Project` 汇总。
   - 支持可搜索多选筛选：`Requester Email`、`MRP Element Indicator` 与 `Item Text`。
-  - Total 行独立显示在汇总表下方，不受排序影响，始终固定在底部。
+  - 支持关键词模糊搜索（对 Role / Item Text / MRP Element Indicator 子串匹配）。
+  - Total 行独立显示在汇总表下方，不受排序影响，始终固定在底部；模糊搜索时自动重新计算。
   - 支持明细下钻与明细导出。
 - `Demand Data`
   - `TD Version Monthly Comparison` 主表。
