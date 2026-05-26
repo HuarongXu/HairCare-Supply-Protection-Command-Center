@@ -40,6 +40,7 @@ PROCESSED_FILES = {
     "production_data": "production_data_summary.csv",
     "production_data_by_level": "production_data_summary_by_level.csv",
     "td_demand_by_dimension": "td_demand_by_dimension.csv",
+    "production_version_compare": "production_version_comparison.csv",
 }
 PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS = {"2.1plannedorders", "2.2processorders"}
 PRODUCTION_VOL_OTHER_EXCLUSION_REASON = (
@@ -711,10 +712,20 @@ def read_production_volume_report(report_path: Path) -> pd.DataFrame:
         raise ValueError(f"Failed to parse production volume report: {report_path}") from exc
 
 
-def build_production_data_summary(root: Path, cfg: PipelineConfig) -> pd.DataFrame:
+def build_production_data_summary(
+    root: Path,
+    cfg: PipelineConfig,
+    *,
+    mtd_report_files: Optional[list[Path]] = None,
+    vol_report_files: Optional[list[Path]] = None,
+) -> pd.DataFrame:
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
-    mtd_reports, production_vol_reports = _discover_production_reports(root)
+    if mtd_report_files is not None or vol_report_files is not None:
+        mtd_reports = mtd_report_files if mtd_report_files is not None else []
+        production_vol_reports = vol_report_files if vol_report_files is not None else []
+    else:
+        mtd_reports, production_vol_reports = _discover_production_reports(root)
 
     if not mtd_reports:
         logging.warning("No MTD report found under %s", root)
@@ -1278,6 +1289,155 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     result = result[result[total_check_cols].abs().sum(axis=1) > 0].copy()
     result = result.sort_values(["Plant", "Level1", "Level2"], ascending=[True, True, True]).reset_index(drop=True)
     return result
+
+
+def build_production_version_comparison(root: Path, cfg: PipelineConfig) -> pd.DataFrame:
+    """Compare the two latest dated production data sets (by plant).
+
+    Groups production report files by date suffix, builds a plant-level
+    summary for each of the latest two dates, then produces a comparison
+    table with Current / Previous / Gap rows – similar to the TD Version
+    Monthly Comparison table.
+    """
+    all_reports = [
+        p for p in root.glob("*.xls*")
+        if p.is_file() and not p.name.startswith("~$")
+    ]
+
+    # Group files by date suffix
+    date_groups: Dict[str, Dict[str, list[Path]]] = {}
+    for p in all_reports:
+        date_str = extract_date_from_filename(p)
+        if not date_str:
+            continue
+        if date_str not in date_groups:
+            date_groups[date_str] = {"mtd": [], "vol": []}
+        name_lower = p.name.lower()
+        if "mtd" in name_lower and "production vol" not in name_lower:
+            date_groups[date_str]["mtd"].append(p)
+        elif "production vol" in name_lower:
+            date_groups[date_str]["vol"].append(p)
+
+    sorted_dates = sorted(date_groups.keys())
+    if len(sorted_dates) < 2:
+        logging.info(
+            "Production version comparison requires >= 2 dated file sets; found %d",
+            len(sorted_dates),
+        )
+        return pd.DataFrame(columns=["Version", "Version Group", "Plant"])
+
+    current_date = sorted_dates[-1]
+    previous_date = sorted_dates[-2]
+
+    current_df = build_production_data_summary(
+        root, cfg,
+        mtd_report_files=sorted(date_groups[current_date]["mtd"]),
+        vol_report_files=sorted(date_groups[current_date]["vol"]),
+    )
+    previous_df = build_production_data_summary(
+        root, cfg,
+        mtd_report_files=sorted(date_groups[previous_date]["mtd"]),
+        vol_report_files=sorted(date_groups[previous_date]["vol"]),
+    )
+
+    if current_df.empty and previous_df.empty:
+        return pd.DataFrame(columns=["Version", "Version Group", "Plant"])
+
+    # Identify numeric columns
+    numeric_base = ["MTD", "Left Production", "Current Month Total"]
+    month_cols_set: set[str] = set()
+    for df in (current_df, previous_df):
+        for c in df.columns:
+            if re.fullmatch(r"\d{4}-\d{2}", str(c)):
+                month_cols_set.add(str(c))
+    month_cols = sorted(month_cols_set)
+    all_numeric = numeric_base + month_cols
+
+    def aggregate_by_plant(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=["Plant"] + all_numeric)
+        working = df.copy()
+        for col in all_numeric:
+            if col not in working.columns:
+                working[col] = 0.0
+            working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+        working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        grouped = (
+            working[working["Plant"] != ""]
+            .groupby("Plant", dropna=False)[all_numeric]
+            .sum()
+            .reset_index()
+        )
+        # GC Total
+        totals = grouped[all_numeric].sum()
+        total_row = pd.DataFrame([{"Plant": "GC Total", **totals.to_dict()}])
+        return pd.concat([grouped, total_row], ignore_index=True)
+
+    current_agg = aggregate_by_plant(current_df)
+    previous_agg = aggregate_by_plant(previous_df)
+
+    all_plants = sorted(
+        set(current_agg["Plant"].tolist() + previous_agg["Plant"].tolist()) - {"GC Total"}
+    )
+    all_plants.append("GC Total")
+
+    def _to_full_date(d: str) -> str:
+        if re.fullmatch(r"\d{8}", d):
+            return f"{d[:4]}-{d[4:6]}-{d[6:8]}"
+        return d
+
+    records: list[dict[str, Any]] = []
+    version_frames = [
+        (f"Current ({_to_full_date(current_date)})", "Current", current_agg),
+        (f"Previous ({_to_full_date(previous_date)})", "Previous", previous_agg),
+    ]
+
+    for idx_v, (version_label, version_group, agg_df) in enumerate(version_frames):
+        for idx_p, plant in enumerate(all_plants):
+            row_data = agg_df[agg_df["Plant"] == plant]
+            row: dict[str, Any] = {
+                "Version": version_label if idx_p == 0 else "",
+                "Version Group": version_group,
+                "Plant": plant,
+            }
+            for col in all_numeric:
+                val = (
+                    float(row_data[col].iloc[0])
+                    if not row_data.empty and col in row_data.columns
+                    else 0.0
+                )
+                row[col] = round(val, 1)
+            records.append(row)
+        # spacer
+        spacer: dict[str, Any] = {"Version": "", "Version Group": "", "Plant": ""}
+        for col in all_numeric:
+            spacer[col] = ""
+        records.append(spacer)
+
+    # Gap section
+    for idx_p, plant in enumerate(all_plants):
+        cur_data = current_agg[current_agg["Plant"] == plant]
+        prev_data = previous_agg[previous_agg["Plant"] == plant]
+        row: dict[str, Any] = {
+            "Version": "Gap" if idx_p == 0 else "",
+            "Version Group": "Gap",
+            "Plant": plant,
+        }
+        for col in all_numeric:
+            cur_val = (
+                float(cur_data[col].iloc[0])
+                if not cur_data.empty and col in cur_data.columns
+                else 0.0
+            )
+            prev_val = (
+                float(prev_data[col].iloc[0])
+                if not prev_data.empty and col in prev_data.columns
+                else 0.0
+            )
+            row[col] = round(cur_val - prev_val, 1)
+        records.append(row)
+
+    return pd.DataFrame(records)
 
 
 # ---------------------------------------------------------------------------
@@ -3152,6 +3312,9 @@ def _run_stage_production(cfg: PipelineConfig) -> None:
 
     td_demand_by_dim = build_td_demand_by_dimension(cfg.data_base_dir, cfg)
     write_processed_csv(td_demand_by_dim, cfg.processed_dir, PROCESSED_FILES["td_demand_by_dimension"])
+
+    production_version_compare = build_production_version_comparison(cfg.production_data_dir, cfg)
+    write_processed_csv(production_version_compare, cfg.processed_dir, PROCESSED_FILES["production_version_compare"])
 
 
 _STAGE_RUNNERS = {

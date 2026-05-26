@@ -221,7 +221,7 @@ _REFRESH_GROUP_KEYS: Dict[str, List[str]] = {
         "pde_alerts",
     ],
     "td": ["td_validation", "td_validation_detail"],
-    "production": ["production_data", "production_data_by_level", "td_demand_by_dimension"],
+    "production": ["production_data", "production_data_by_level", "td_demand_by_dimension", "production_version_compare"],
 }
 
 
@@ -235,6 +235,7 @@ def _load_single_key(cfg: AppConfig, key: str) -> Any:
         "production_data": lambda: load_dataset(cfg.processed_dir, "production_data_summary.csv"),
         "production_data_by_level": lambda: load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv"),
         "td_demand_by_dimension": lambda: load_dataset(cfg.processed_dir, "td_demand_by_dimension.csv"),
+        "production_version_compare": lambda: load_dataset(cfg.processed_dir, "production_version_comparison.csv"),
         "td_validation": lambda: load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv"),
         "td_validation_detail": lambda: load_dataset(cfg.processed_dir, "td_version_gap_details.csv"),
         "historical_shipment": lambda: load_historical_shipment_dataset(cfg),
@@ -1451,6 +1452,113 @@ def build_production_data_table_by_plant(
     return columns, grouped[ordered_cols].to_dict("records")
 
 
+def build_production_version_comparison_table(
+    df: pd.DataFrame,
+) -> Tuple[List[Dict], List[Dict]]:
+    """Format the production version comparison DataFrame for DataTable display.
+
+    Returns (columns, rows) with numeric values kept as integers so that
+    DataTable filter_query comparisons (< 0, > 0) work for Gap styling.
+    """
+    base_cols = ["Version", "Version Group", "Plant"]
+    if df.empty:
+        return [{"name": c, "id": c} for c in base_cols], []
+
+    working = df.copy()
+
+    # Fix NaN in Version column from CSV roundtrip
+    working["Version"] = working["Version"].fillna("").astype(str)
+    working["Version"] = working["Version"].replace("nan", "")
+    working["Version Group"] = working["Version Group"].fillna("").astype(str)
+    working["Version Group"] = working["Version Group"].replace("nan", "")
+    working["Plant"] = working["Plant"].fillna("").astype(str)
+    working["Plant"] = working["Plant"].replace("nan", "")
+
+    # Discover month columns and skip the first one (same logic as Table 1)
+    month_cols = sorted(
+        [c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))]
+    )
+    display_month_cols = month_cols[1:] if month_cols else []
+
+    # Rename Current Month Total → Current Month for display
+    if "Current Month Total" in working.columns:
+        working = working.rename(columns={"Current Month Total": "Current Month"})
+
+    numeric_display = ["MTD", "Left Production", "Current Month"] + display_month_cols
+    ordered_cols = ["Version", "Version Group", "Plant"] + numeric_display
+
+    # Keep only available columns
+    ordered_cols = [c for c in ordered_cols if c in working.columns]
+
+    # Convert numeric columns: spacer rows stay as empty string, others become int
+    for col in numeric_display:
+        if col not in working.columns:
+            continue
+        working[col] = working[col].apply(
+            lambda v: (
+                ""
+                if (isinstance(v, str) and v.strip() == "")
+                or (isinstance(v, float) and pd.isna(v))
+                else int(round(float(v)))
+            )
+        )
+
+    # Build columns with text columns + numeric columns
+    columns: List[Dict] = []
+    for c in ordered_cols:
+        if c in numeric_display:
+            columns.append({"name": c, "id": c, "type": "numeric"})
+        else:
+            columns.append({"name": c, "id": c})
+
+    return columns, working[ordered_cols].to_dict("records")
+
+
+def build_production_version_style_data_conditional(
+    columns: List[Dict],
+) -> List[Dict]:
+    """Build conditional style rules for the production version comparison table."""
+    rules: List[Dict] = list(PDE_STYLE_DATA_CONDITIONAL)
+
+    numeric_cols = [
+        col.get("id")
+        for col in columns
+        if col.get("id") in ("MTD", "Left Production", "Current Month")
+        or re.fullmatch(r"\d{4}-\d{2}", str(col.get("id", "")))
+    ]
+
+    for col in numeric_cols:
+        rules.append(
+            {
+                "if": {
+                    "filter_query": f'{{Version Group}} = "Gap" && {{{col}}} < 0',
+                    "column_id": col,
+                },
+                "color": "#dc2626",
+                "fontWeight": "700",
+            }
+        )
+        rules.append(
+            {
+                "if": {
+                    "filter_query": f'{{Version Group}} = "Gap" && {{{col}}} > 0',
+                    "column_id": col,
+                },
+                "color": "#16a34a",
+                "fontWeight": "700",
+            }
+        )
+
+    rules.append(
+        {
+            "if": {"filter_query": '{Plant} = "GC Total"'},
+            "backgroundColor": "#eaf2ff",
+            "fontWeight": "700",
+        }
+    )
+    return rules
+
+
 def build_production_data_table_by_plant_level(
     df: pd.DataFrame,
     plant_order: Optional[List[str]] = None,
@@ -2056,6 +2164,10 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
         include_segment_totals=False,
     )
     page_sheets["Production Data"].append(("01 Table1 By Plant", _snapshot_to_dataframe(p1_columns, p1_rows)))
+
+    prod_ver_df = pd.DataFrame(data_bundle.get("production_version_compare", []))
+    pv_columns, pv_rows = build_production_version_comparison_table(prod_ver_df)
+    page_sheets["Production Data"].append(("01b Version Comparison", _snapshot_to_dataframe(pv_columns, pv_rows)))
 
     p2_columns, p2_rows = build_production_data_table_by_plant_level(
         production_data_by_level_df,
@@ -3256,15 +3368,16 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         "1864": ("XQ Total", ["1864", "D352"]),
         "A868": ("TC Total", ["A868", "A673"]),
     }
-    production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
-        production_data_df,
-        plant_order=production_group_1,
-        include_segment_totals=False,
-    )
     production_level_columns_1, production_level_rows_1 = build_production_data_table_by_plant_level(
         production_data_by_level_df,
         plant_order=production_group_1,
     )
+    production_version_df = pd.DataFrame(data_bundle.get("production_version_compare", []))
+    if not production_version_df.empty:
+        keep = production_version_df["Plant"].fillna("").isin(["1864", "0386", "A868", "GC Total", ""])
+        production_version_df = production_version_df[keep].reset_index(drop=True)
+    production_version_columns, production_version_rows = build_production_version_comparison_table(production_version_df)
+    production_version_styles = build_production_version_style_data_conditional(production_version_columns)
     td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
     td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
 
@@ -3351,7 +3464,9 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                     style_table={"overflowX": "auto"},
                                     tooltip_delay=2000,
                                     tooltip_duration=None,
-                                    css=[{"selector": ".dash-tooltip", "rule": "font-family: Century Gothic, Segoe UI, sans-serif; font-size: 13px; max-width: 800px; width: max-content; white-space: nowrap;"}],
+                                    css=[
+                                        {"selector": ".dash-tooltip .dash-table-tooltip", "rule": "max-width: none !important; min-width: 0 !important; width: max-content !important; background-color: #eef3fb !important; padding: 10px 14px !important; font-family: Century Gothic, Segoe UI, sans-serif; font-size: 13px; white-space: pre-line;"},
+                                    ],
                                 )
                             ),
                             html.Div(
@@ -4009,34 +4124,29 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                     html.Div(
                                         style={"paddingTop": "12px"},
                                         children=[
-                                            html.H4("Production Data (By Plant) - Table 1"),
+                                            html.H4("Production Data Version Comparison (By Plant)"),
+                                            html.P(
+                                                "Auto-detected from the two latest dated file sets in Production Volume folder.",
+                                                style={"color": "#666", "fontSize": "13px", "marginBottom": "8px"},
+                                            ),
                                             DataTable(
-                                                id="production-data-plant-table-1",
-                                                columns=production_plant_columns_1,
-                                                data=production_plant_rows_1,
+                                                id="production-version-compare-table",
+                                                columns=production_version_columns,
+                                                data=production_version_rows,
                                                 style_header=PDE_STYLE_HEADER,
                                                 style_cell=PDE_STYLE_CELL,
-                                                style_data_conditional=[
-                                                    *PDE_STYLE_DATA_CONDITIONAL,
-                                                    {
-                                                        "if": {
-                                                            "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
-                                                        },
-                                                        "fontWeight": "700",
-                                                        "backgroundColor": "#f3f8ff",
-                                                    },
-                                                    {
-                                                        "if": {"filter_query": '{Plant} = "GC Total"'},
-                                                        "fontWeight": "700",
-                                                        "backgroundColor": "#edf4ff",
-                                                    },
-                                                ],
+                                                style_data_conditional=production_version_styles,
                                                 style_cell_conditional=[
                                                     {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                                                    {"if": {"column_id": "Version"}, "textAlign": "left"},
+                                                    {"if": {"column_id": "Version Group"}, "display": "none"},
+                                                ],
+                                                style_header_conditional=[
+                                                    {"if": {"column_id": "Version Group"}, "display": "none"},
                                                 ],
                                                 page_action="none",
                                                 style_table={"overflowX": "auto"},
-                                                sort_action="native",
+                                                sort_action="none",
                                                 filter_action="none",
                                             ),
                                             html.H4("Production Data (By Plant / Level1 / Level2) - Table 2", style={"marginTop": "18px"}),
@@ -4693,8 +4803,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("td-validation-table", "columns"),
         Output("td-validation-table", "data"),
         Output("td-validation-table", "style_data_conditional"),
-        Output("production-data-plant-table-1", "columns"),
-        Output("production-data-plant-table-1", "data"),
+        Output("production-version-compare-table", "columns"),
+        Output("production-version-compare-table", "data"),
+        Output("production-version-compare-table", "style_data_conditional"),
         Output("production-data-level-table-2", "columns"),
         Output("production-data-level-table-2", "data"),
         Input("data-store", "data"),
@@ -4804,11 +4915,12 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             "1864": ("XQ Total", ["1864", "D352"]),
             "A868": ("TC Total", ["A868", "A673"]),
         }
-        production_plant_columns_1, production_plant_rows_1 = build_production_data_table_by_plant(
-            production_data_df,
-            plant_order=production_group_1,
-            include_segment_totals=False,
-        )
+        production_version_df = pd.DataFrame(data.get("production_version_compare", []))
+        if not production_version_df.empty:
+            keep = production_version_df["Plant"].fillna("").isin(["1864", "0386", "A868", "GC Total", ""])
+            production_version_df = production_version_df[keep].reset_index(drop=True)
+        production_version_columns, production_version_rows = build_production_version_comparison_table(production_version_df)
+        production_version_styles = build_production_version_style_data_conditional(production_version_columns)
         production_level_columns_1, production_level_rows_1 = build_production_data_table_by_plant_level(
             production_data_by_level_df,
             plant_order=production_group_1,
@@ -4865,8 +4977,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             td_validation_columns,
             td_validation_rows,
             td_validation_styles,
-            production_plant_columns_1,
-            production_plant_rows_1,
+            production_version_columns,
+            production_version_rows,
+            production_version_styles,
             production_level_columns_1,
             production_level_rows_1,
         )

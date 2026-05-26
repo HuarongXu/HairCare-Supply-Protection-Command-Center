@@ -457,3 +457,52 @@ body {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ── Dash DataTable Tooltip Auto-Size Fix ──────────────────── */
+/* Outer wrapper: Dash default is position:absolute, z-index:500 */
+.dash-tooltip {
+  z-index: 9999 !important;
+  border: 1px solid #bfcfe0 !important;
+  border-radius: 8px !important;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12) !important;
+}
+
+/* Inner content box: Dash hardcodes max-width:300px; min-width:300px;
+   background-color:#f6f6f6.  Override ALL of these. */
+.dash-tooltip .dash-table-tooltip {
+  max-width: none !important;
+  min-width: 0 !important;
+  width: max-content !important;
+  background-color: #eef3fb !important;
+  padding: 10px 14px !important;
+  font-family: 'Century Gothic', 'Segoe UI', sans-serif;
+  font-size: 13px;
+  white-space: pre-line;
+}
+
+.dash-tooltip .dash-table-tooltip table {
+  border-collapse: collapse;
+  width: auto;
+  white-space: nowrap;
+}
+
+.dash-tooltip .dash-table-tooltip table th,
+.dash-tooltip .dash-table-tooltip table td {
+  padding: 4px 10px;
+  border: 1px solid #d0dae8;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dash-tooltip .dash-table-tooltip table th {
+  background-color: #dce6f4;
+  font-weight: 600;
+}
+
+/* Arrow pseudo-element color: match the light background */
+.dash-tooltip[data-attr-anchor='top']:after {
+  border-bottom-color: #eef3fb !important;
+}
+.dash-tooltip[data-attr-anchor='bottom']:after {
+  border-top-color: #eef3fb !important;
+}
