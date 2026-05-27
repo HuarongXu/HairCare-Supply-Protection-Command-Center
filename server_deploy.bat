@@ -210,8 +210,14 @@ REM --- server_start.bat ---
   echo echo [INFO] Running pipeline...
   echo python scripts\matres_pipeline.py
   echo.
-  echo echo [INFO] Starting dashboard...
-  echo python dashboards\matres_app.py
+  echo echo [INFO] Starting dashboard with Waitress...
+  echo echo [INFO] Local URL: http://localhost:8050
+  echo for /f "tokens=2 delims=: " %%%%I in ^('ipconfig ^| findstr /i "IPv4"'^) do ^(
+  echo   set "_IP=%%%%I"
+  echo   set "_IP=^^!_IP: =^^!"
+  echo   if not "^^!_IP^^!"=="" echo [INFO] LAN URL: http://^^!_IP^^!:8050
+  echo ^)
+  echo python -m waitress --listen=0.0.0.0:8050 dashboards.matres_app:app.server
 ) > "%DEPLOY_DIR%\server_start.bat"
 
 echo [OK] server_start.bat created.

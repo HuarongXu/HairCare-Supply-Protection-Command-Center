@@ -143,12 +143,17 @@ echo.
 REM -- Start dashboard --
 echo ========================================
 echo   Starting Dashboard ...
-echo   URL: http://localhost:8050
+echo   URL (local): http://localhost:8050
+for /f "tokens=2 delims=: " %%I in ('ipconfig ^| findstr /i "IPv4"') do (
+  set "_IP=%%I"
+  set "_IP=!_IP: =!"
+  if not "!_IP!"=="" echo   URL (LAN):   http://!_IP!:8050
+)
 echo   Press Ctrl+C to stop
 echo ========================================
 echo.
 title MatRes Dashboard Server
-python .\dashboards\matres_app.py
+python -m waitress --listen=0.0.0.0:8050 dashboards.matres_app:app.server
 
 echo.
 echo [INFO] Dashboard has exited.
