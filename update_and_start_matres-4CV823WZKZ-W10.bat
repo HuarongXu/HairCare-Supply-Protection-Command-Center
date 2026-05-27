@@ -150,7 +150,7 @@ if errorlevel 1 (
   exit /b 1
 )
 
-REM ========== 6) 重跑数据 + 启动看板 ==========
+REM ========== 6) 重跑数据 ==========
 echo [INFO] Running pipeline...
 python .\scripts\matres_pipeline.py
 if errorlevel 1 (
@@ -159,8 +159,35 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [INFO] Starting dashboard...
-python .\dashboards\matres_app.py
+REM ========== 7) 获取运行信息 ==========
+for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "BRANCH=%%B"
+for /f "delims=" %%C in ('git rev-parse --short HEAD') do set "COMMIT=%%C"
+
+echo.
+echo ========================================
+echo   MatRes Dashboard (Production Mode)
+echo ========================================
+echo [INFO] Machine:    %COMPUTERNAME%
+echo [INFO] Branch:     !BRANCH!
+echo [INFO] Commit:     !COMMIT!
+echo [INFO] Python:     %PY_CMD%
+echo [INFO] Venv:       %VENV_DIR%
+echo [INFO] Startup:    Waitress (production server)
+echo ========================================
+echo.
+echo   Local URL:  http://localhost:8050
+for /f "tokens=2 delims=: " %%I in ('ipconfig ^| findstr /i "IPv4"') do (
+  set "_IP=%%I"
+  set "_IP=!_IP: =!"
+  if not "!_IP!"=="" echo   LAN URL:    http://!_IP!:8050
+)
+echo.
+echo   Press Ctrl+C to stop
+echo ========================================
+echo.
+
+REM ========== 8) 启动看板（生产模式 Waitress）==========
+python -m waitress --listen=0.0.0.0:8050 dashboards.matres_app:app.server
 
 popd
 endlocal
