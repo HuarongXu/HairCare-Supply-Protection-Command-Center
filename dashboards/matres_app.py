@@ -541,7 +541,7 @@ def _build_pde_tooltip_data(
     columns: List[Dict[str, str]],
     data: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
-    """Build tooltip_data for PDE alert tables with row and cell context."""
+    """Build tooltip_data for PDE alert tables in the same markdown style as summary table."""
     if not columns or not data:
         return []
 
@@ -557,16 +557,60 @@ def _build_pde_tooltip_data(
         requester = str(row.get("Requester Email", "")).strip() or "N/A"
         project = str(row.get("Project", "")).strip() or "N/A"
         total = str(row.get(TOTAL_LABEL, "-")).strip() or "-"
+        row_header = f"**{requester}** | {project}"
+
+        def _read_project_breakdown(detail_key: str) -> List[Tuple[str, str, float]]:
+            raw = row.get(detail_key, "")
+            if not raw:
+                return []
+            try:
+                parsed = json.loads(str(raw))
+            except Exception:
+                return []
+            details: List[Tuple[str, str, float]] = []
+            for entry in parsed if isinstance(parsed, list) else []:
+                if not isinstance(entry, dict):
+                    continue
+                proj = str(entry.get("project", "")).strip() or "N/A"
+                owner = str(entry.get("owner", "")).strip() or requester
+                msu_val = pd.to_numeric(entry.get("msu", 0), errors="coerce")
+                if pd.notna(msu_val) and float(msu_val) != 0:
+                    details.append((proj, owner, float(msu_val)))
+            return sorted(details, key=lambda x: -x[2])
+
+        total_breakdown = _read_project_breakdown(f"__detail__{TOTAL_LABEL}")
+        total_detail_rows = ["| Project | Owner | MSU |", "|---|---|---|"]
+        if total_breakdown:
+            for proj, owner, msu_val in total_breakdown[:12]:
+                total_detail_rows.append(f"| {proj} | {owner} | {msu_val:,.1f} |")
+        else:
+            total_detail_rows.append("| N/A | N/A | - |")
 
         tip_row: Dict[str, Any] = {
-            "Requester Email": {"value": f"**Requester**: {requester}", "type": "markdown"},
-            "Project": {"value": f"**Project**: {project}", "type": "markdown"},
+            "Requester Email": {
+                "value": "\n".join([
+                    f"{row_header} | {TOTAL_LABEL}: **{total}** MSU",
+                    "",
+                    *total_detail_rows,
+                ]),
+                "type": "markdown",
+            },
+            "Project": {
+                "value": "\n".join([
+                    row_header,
+                    "",
+                    f"{TOTAL_LABEL}: **{total}** MSU",
+                    "",
+                    *total_detail_rows,
+                ]),
+                "type": "markdown",
+            },
             TOTAL_LABEL: {
-                "value": (
-                    f"**Requester**: {requester}  \n"
-                    f"**Project**: {project}  \n"
-                    f"**{TOTAL_LABEL}**: {total} MSU"
-                ),
+                "value": "\n".join([
+                    f"{row_header} | {TOTAL_LABEL}: **{total}** MSU",
+                    "",
+                    *total_detail_rows,
+                ]),
                 "type": "markdown",
             },
         }
@@ -574,18 +618,71 @@ def _build_pde_tooltip_data(
         for col_id in date_col_ids:
             value = str(row.get(col_id, "-")).strip() or "-"
             col_label = col_names.get(col_id, col_id)
+            per_date_breakdown = _read_project_breakdown(f"__detail__{col_id}")
+            date_detail_rows = ["| Project | Owner | MSU |", "|---|---|---|"]
+            if per_date_breakdown:
+                for proj, owner, msu_val in per_date_breakdown[:12]:
+                    date_detail_rows.append(f"| {proj} | {owner} | {msu_val:,.1f} |")
+            else:
+                date_detail_rows.append("| N/A | N/A | - |")
             tip_row[col_id] = {
-                "value": (
-                    f"**Requester**: {requester}  \n"
-                    f"**Project**: {project}  \n"
-                    f"**{col_label}**: {value} MSU"
-                ),
+                "value": "\n".join([
+                    f"{row_header} | {col_label}: **{value}** MSU",
+                    "",
+                    *date_detail_rows,
+                ]),
                 "type": "markdown",
             }
 
         tooltip_rows.append(tip_row)
 
     return tooltip_rows
+
+
+def _sort_pde_records_keep_total_last(
+    records: List[Dict[str, Any]],
+    sort_by: Optional[List[Dict[str, str]]],
+) -> List[Dict[str, Any]]:
+    """Sort PDE rows while pinning the Total row at the bottom."""
+    if not records:
+        return []
+
+    all_records = list(records)
+    total_rows = [
+        row for row in all_records
+        if str(row.get("Requester Email", "")).strip() == TOTAL_LABEL
+    ]
+    body_rows = [
+        row for row in all_records
+        if str(row.get("Requester Email", "")).strip() != TOTAL_LABEL
+    ]
+    if not body_rows:
+        return total_rows
+
+    sort_rule = (sort_by or [{"column_id": TOTAL_LABEL, "direction": "desc"}])[0]
+    sort_col = str(sort_rule.get("column_id", TOTAL_LABEL))
+    sort_desc = str(sort_rule.get("direction", "desc")).lower() == "desc"
+
+    body_df = pd.DataFrame(body_rows)
+    if sort_col not in body_df.columns:
+        return body_rows + total_rows
+
+    def parse_numeric(value: Any) -> float:
+        text = str(value).replace(",", "").strip()
+        if text in {"", "-", "nan", "None"}:
+            return float("nan")
+        return pd.to_numeric(text, errors="coerce")
+
+    body_df["__sort_num"] = body_df[sort_col].apply(parse_numeric)
+    body_df["__is_num"] = body_df["__sort_num"].notna().astype(int)
+    body_df["__sort_txt"] = body_df[sort_col].astype(str).str.lower()
+    body_df = body_df.sort_values(
+        by=["__is_num", "__sort_num", "__sort_txt"],
+        ascending=[False, not sort_desc, True],
+        kind="mergesort",
+    )
+    sorted_body = body_df.drop(columns=["__sort_num", "__is_num", "__sort_txt"]).to_dict("records")
+    return sorted_body + total_rows
 
 
 def build_monthly_matrix(df: pd.DataFrame, role: str) -> Tuple[List[Dict], List[Dict]]:
@@ -1049,6 +1146,46 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
 
     date_labels = sort_date_labels(working["availability_date"].dropna().tolist())
 
+    # Build per-requester per-date project-owner breakdown for tooltip details.
+    project_detail_map: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    if "detail_json" in working.columns:
+        for _, rec in working.iterrows():
+            requester = str(rec.get("Requester Email", "")).strip()
+            date_label = str(rec.get("availability_date", "")).strip()
+            raw = rec.get("detail_json", "")
+            details: List[Dict[str, Any]] = []
+            if raw:
+                try:
+                    parsed = json.loads(str(raw))
+                except Exception:
+                    parsed = []
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if not isinstance(item, dict):
+                            continue
+                        proj = str(item.get("project", "")).strip() or "未定义"
+                        owner = str(item.get("owner", requester)).strip() or requester
+                        msu_val = pd.to_numeric(item.get("msu", 0), errors="coerce")
+                        if pd.notna(msu_val) and float(msu_val) != 0:
+                            details.append({"project": proj, "owner": owner, "msu": float(msu_val)})
+            project_detail_map[(requester, date_label)] = sorted(details, key=lambda x: -float(x.get("msu", 0)))
+    else:
+        detail_frame = working[["Requester Email", "availability_date", "project_label", "msu_due"]].copy()
+        detail_frame["msu_due"] = pd.to_numeric(detail_frame["msu_due"], errors="coerce").fillna(0.0)
+        detail_grouped = (
+            detail_frame.groupby(["Requester Email", "availability_date", "project_label"], dropna=False)["msu_due"]
+            .sum(min_count=1)
+            .reset_index(name="msu_due")
+        )
+        for (requester, date_label), grp in detail_grouped.groupby(["Requester Email", "availability_date"], dropna=False):
+            items: List[Dict[str, Any]] = []
+            for _, rec in grp.sort_values("msu_due", ascending=False).iterrows():
+                proj = str(rec.get("project_label", "")).strip() or "N/A"
+                msu_val = pd.to_numeric(rec.get("msu_due", 0), errors="coerce")
+                if pd.notna(msu_val) and float(msu_val) != 0:
+                    items.append({"project": proj, "owner": str(requester), "msu": float(msu_val)})
+            project_detail_map[(str(requester), str(date_label))] = items
+
     pivot = (
         working.pivot_table(
             index="Requester Email",
@@ -1096,9 +1233,25 @@ def build_pde_matrix(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
             "Requester Email": requester,
             "Project": project_map.get(requester, "未定义"),
         }
+        total_project_owner_agg: Dict[Tuple[str, str], float] = {}
         for label in date_labels + [TOTAL_LABEL]:
             value = row.get(label, 0)
             record[label] = fmt(value)
+            if label != TOTAL_LABEL:
+                date_details = project_detail_map.get((str(requester), str(label)), [])
+                record[f"__detail__{label}"] = json.dumps(date_details, ensure_ascii=False)
+                for entry in date_details:
+                    proj = str(entry.get("project", "N/A"))
+                    owner = str(entry.get("owner", str(requester)))
+                    key = (proj, owner)
+                    total_project_owner_agg[key] = total_project_owner_agg.get(key, 0.0) + float(entry.get("msu", 0.0))
+
+        total_details = [
+            {"project": proj, "owner": owner, "msu": float(msu)}
+            for (proj, owner), msu in sorted(total_project_owner_agg.items(), key=lambda x: -x[1])
+            if float(msu) != 0
+        ]
+        record[f"__detail__{TOTAL_LABEL}"] = json.dumps(total_details, ensure_ascii=False)
         records.append(record)
 
     return columns, records
@@ -1115,6 +1268,7 @@ def summarize_pde_alerts_from_details(df: pd.DataFrame, fg_only: bool) -> pd.Dat
         "avg_pde",
         "closest_availability",
         "project_label",
+        "detail_json",
         "requester_role",
     ]
     required_columns = ["PDE Checking", "Availability Date", "MSU", "Requester Email", "Item Text"]
@@ -1154,6 +1308,27 @@ def summarize_pde_alerts_from_details(df: pd.DataFrame, fg_only: bool) -> pd.Dat
         return " / ".join(cleaned) if cleaned else "未定义"
 
     working["availability_date"] = working["Availability Date"].dt.date
+
+    detail_by_project = (
+        working.assign(
+            __project=working["MRP Element Indicator"].fillna("").astype(str).str.strip(),
+            __owner=working["Requester Email"].fillna("").astype(str).str.strip(),
+        )
+        .groupby(["Requester Email", "availability_date", "__project", "__owner"], dropna=False)["MSU"]
+        .sum(min_count=1)
+        .reset_index(name="msu")
+    )
+    detail_map: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for (requester, date_val), grp in detail_by_project.groupby(["Requester Email", "availability_date"], dropna=False):
+        rows: List[Dict[str, Any]] = []
+        for _, rec in grp.sort_values("msu", ascending=False).iterrows():
+            proj = str(rec.get("__project", "")).strip() or "未定义"
+            owner = str(rec.get("__owner", "")).strip() or "N/A"
+            msu_val = pd.to_numeric(rec.get("msu", 0), errors="coerce")
+            if pd.notna(msu_val) and float(msu_val) != 0:
+                rows.append({"project": proj, "owner": owner, "msu": float(msu_val)})
+        detail_map[(str(requester), str(date_val))] = rows
+
     summary = (
         working.groupby(["Requester Email", "availability_date"], dropna=False)
         .agg(
@@ -1177,6 +1352,13 @@ def summarize_pde_alerts_from_details(df: pd.DataFrame, fg_only: bool) -> pd.Dat
         .astype(str)
     )
     summary["closest_availability"] = summary["closest_availability"].dt.strftime("%Y-%m-%d")
+    summary["detail_json"] = summary.apply(
+        lambda row: json.dumps(
+            detail_map.get((str(row.get("Requester Email", "")), str(row.get("availability_date", ""))), []),
+            ensure_ascii=False,
+        ),
+        axis=1,
+    )
 
     return summary.sort_values(["closest_availability", "max_pde"], ascending=[True, False])
 
@@ -2174,6 +2356,8 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     page_sheets["Supply Protection"].append(("02 Monthly Summary", _snapshot_to_dataframe(summary_columns, summary_data)))
 
     pde_columns, pde_data, pde_fg_columns, pde_fg_data = build_pde_tables(pde_alerts, request_details)
+    pde_data = _sort_pde_records_keep_total_last(pde_data, [{"column_id": TOTAL_LABEL, "direction": "desc"}])
+    pde_fg_data = _sort_pde_records_keep_total_last(pde_fg_data, [{"column_id": TOTAL_LABEL, "direction": "desc"}])
     page_sheets["Supply Protection"].append(("03 Past Due Alerts", _snapshot_to_dataframe(pde_columns, pde_data)))
 
     drill_columns, drill_rows = build_role_item_project_summary(request_details, ROLE_ALL_VALUE, [], [])
@@ -3461,7 +3645,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     ]),
                     html.Div([
                         html.H4("Actual PDE (<=0 days)"),
-                        html.Span(metrics["pde_actual"], id="metric-pde-actual", className="metric-value warning"),
+                        html.Span(metrics["pde_actual"], id="metric-item-count", className="metric-value warning"),
                     ]),
                     html.Div([
                         html.H4("PDE Alerts（Coming 7days）"),
@@ -3561,7 +3745,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         id="pde-table",
                         columns=pde_columns,
                         data=pde_data,
-                        tooltip_data=_build_pde_tooltip_data(pde_columns, pde_data),
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
@@ -3583,7 +3766,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 "width": "auto",
                             },
                         ],
-                        sort_action="native",
+                        sort_action="custom",
                         sort_mode="single",
                         sort_by=[{"column_id": TOTAL_LABEL, "direction": "desc"}],
                         tooltip_delay=200,
@@ -3596,7 +3779,6 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         id="pde-fg-table",
                         columns=pde_fg_columns,
                         data=pde_fg_data,
-                        tooltip_data=_build_pde_tooltip_data(pde_fg_columns, pde_fg_data),
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
@@ -3618,7 +3800,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 "width": "auto",
                             },
                         ],
-                        sort_action="native",
+                        sort_action="custom",
                         sort_mode="single",
                         sort_by=[{"column_id": TOTAL_LABEL, "direction": "desc"}],
                         tooltip_delay=200,
@@ -4832,7 +5014,7 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
 
     @app.callback(
         Output("metric-total-msu", "children"),
-        Output("metric-pde-actual", "children"),
+        Output("metric-item-count", "children"),
         Output("metric-pde-open", "children"),
         Input("data-store", "data"),
     )
@@ -4850,10 +5032,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("role-trend", "figure"),
         Output("pde-table", "columns"),
         Output("pde-table", "data"),
-        Output("pde-table", "tooltip_data"),
         Output("pde-fg-table", "columns"),
         Output("pde-fg-table", "data"),
-        Output("pde-fg-table", "tooltip_data"),
         Output("drill-requester-filter", "options"),
         Output("drill-requester-filter", "value"),
         Output("drill-mrp-filter", "options"),
@@ -4896,7 +5076,15 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Input("drill-item-text-filter", "value"),
         Input("drill-fuzzy-search", "value"),
     )
-    def update_visuals(data, role_value, drill_role_value, drill_requester_value, drill_mrp_value, drill_item_text_value, drill_fuzzy_search):
+    def update_visuals(
+        data,
+        role_value,
+        drill_role_value,
+        drill_requester_value,
+        drill_mrp_value,
+        drill_item_text_value,
+        drill_fuzzy_search,
+    ):
         monthly_requester = pd.DataFrame(data.get("monthly_requester", []))
         monthly_level1 = pd.DataFrame(data.get("monthly_level1", []))
         hc_idp_monthly = pd.DataFrame(data.get("hc_idp_monthly", []))
@@ -4933,8 +5121,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         ]
         role_fig = build_role_trend(monthly_requester, selected_role)
         pde_columns, pde_records, pde_fg_columns, pde_fg_records = build_pde_tables(pde_alerts, request_details)
-        pde_tooltip_data = _build_pde_tooltip_data(pde_columns, pde_records)
-        pde_fg_tooltip_data = _build_pde_tooltip_data(pde_fg_columns, pde_fg_records)
+        pde_records = _sort_pde_records_keep_total_last(pde_records, [{"column_id": TOTAL_LABEL, "direction": "desc"}])
+        pde_fg_records = _sort_pde_records_keep_total_last(pde_fg_records, [{"column_id": TOTAL_LABEL, "direction": "desc"}])
         drill_columns, drill_rows = build_role_item_project_summary(
             request_details,
             selected_drill_role,
@@ -5028,10 +5216,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             role_fig,
             pde_columns,
             pde_records,
-            pde_tooltip_data,
             pde_fg_columns,
             pde_fg_records,
-            pde_fg_tooltip_data,
             drill_requester_options,
             valid_requesters,
             drill_mrp_options,
@@ -5067,6 +5253,77 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             production_level_columns_1,
             production_level_rows_1,
         )
+
+    @app.callback(
+        Output("pde-table", "data", allow_duplicate=True),
+        Output("pde-table", "tooltip_data", allow_duplicate=True),
+        Output("pde-fg-table", "data", allow_duplicate=True),
+        Output("pde-fg-table", "tooltip_data", allow_duplicate=True),
+        Input("pde-table", "sort_by"),
+        Input("pde-fg-table", "sort_by"),
+        State("pde-table", "data"),
+        State("pde-table", "columns"),
+        State("pde-fg-table", "data"),
+        State("pde-fg-table", "columns"),
+        prevent_initial_call=True,
+    )
+    def resort_pde_tables(pde_sort_by, pde_fg_sort_by, pde_data, pde_columns, pde_fg_data, pde_fg_columns):
+        sorted_pde = _sort_pde_records_keep_total_last(pde_data or [], pde_sort_by)
+        sorted_pde_fg = _sort_pde_records_keep_total_last(pde_fg_data or [], pde_fg_sort_by)
+        return (
+            sorted_pde,
+            _build_pde_tooltip_data(pde_columns or [], sorted_pde),
+            sorted_pde_fg,
+            _build_pde_tooltip_data(pde_fg_columns or [], sorted_pde_fg),
+        )
+
+    @app.callback(
+        Output("pde-table", "tooltip_data", allow_duplicate=True),
+        Output("pde-fg-table", "tooltip_data", allow_duplicate=True),
+        Input("pde-table", "derived_viewport_data"),
+        Input("pde-table", "derived_viewport_indices"),
+        State("pde-table", "columns"),
+        State("pde-table", "data"),
+        Input("pde-fg-table", "derived_viewport_data"),
+        Input("pde-fg-table", "derived_viewport_indices"),
+        State("pde-fg-table", "columns"),
+        State("pde-fg-table", "data"),
+        prevent_initial_call=True,
+    )
+    def sync_pde_tooltips_to_viewport(
+        pde_view_rows,
+        pde_view_indices,
+        pde_columns,
+        pde_all_rows,
+        pde_fg_view_rows,
+        pde_fg_view_indices,
+        pde_fg_columns,
+        pde_fg_all_rows,
+    ):
+        pde_all_rows = pde_all_rows or []
+        pde_fg_all_rows = pde_fg_all_rows or []
+        pde_tips_all = [{} for _ in pde_all_rows]
+        pde_fg_tips_all = [{} for _ in pde_fg_all_rows]
+
+        pde_view_tips = _build_pde_tooltip_data(pde_columns or [], pde_view_rows or [])
+        for i, raw_idx in enumerate(pde_view_indices or []):
+            try:
+                idx = int(raw_idx)
+            except Exception:
+                continue
+            if 0 <= idx < len(pde_tips_all) and i < len(pde_view_tips):
+                pde_tips_all[idx] = pde_view_tips[i]
+
+        pde_fg_view_tips = _build_pde_tooltip_data(pde_fg_columns or [], pde_fg_view_rows or [])
+        for i, raw_idx in enumerate(pde_fg_view_indices or []):
+            try:
+                idx = int(raw_idx)
+            except Exception:
+                continue
+            if 0 <= idx < len(pde_fg_tips_all) and i < len(pde_fg_view_tips):
+                pde_fg_tips_all[idx] = pde_fg_view_tips[i]
+
+        return pde_tips_all, pde_fg_tips_all
 
     # ── Production Dimension Detail callback ──────────────────────
     @app.callback(
