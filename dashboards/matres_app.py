@@ -388,9 +388,12 @@ DETAIL_VIEW_FIELDS = [
 ]
 
 
-def compute_metrics(monthly_item: pd.DataFrame, pde_alerts: pd.DataFrame) -> Dict[str, str]:
+def compute_metrics(
+    monthly_item: pd.DataFrame,
+    pde_alerts: pd.DataFrame,
+    request_details: Optional[pd.DataFrame] = None,
+) -> Dict[str, str]:
     total_msu = monthly_item["total_msu"].sum() if not monthly_item.empty else 0
-    unique_items = monthly_item["Item Text"].nunique() if not monthly_item.empty else 0
     if not pde_alerts.empty:
         if "msu_due" in pde_alerts.columns:
             pde_open = pde_alerts["msu_due"].sum(min_count=1)
@@ -400,9 +403,20 @@ def compute_metrics(monthly_item: pd.DataFrame, pde_alerts: pd.DataFrame) -> Dic
             pde_open = 0
     else:
         pde_open = 0
+
+    pde_actual = 0
+    if request_details is not None and not request_details.empty:
+        if "PDE Checking" in request_details.columns and "MSU" in request_details.columns:
+            pde_working = request_details[["PDE Checking", "MSU"]].copy()
+            pde_working["PDE Checking"] = pd.to_numeric(pde_working["PDE Checking"], errors="coerce")
+            pde_working["MSU"] = pd.to_numeric(pde_working["MSU"], errors="coerce").fillna(0.0)
+            pde_actual = pde_working.loc[pde_working["PDE Checking"].le(0), "MSU"].sum(min_count=1)
+            if pd.isna(pde_actual):
+                pde_actual = 0
+
     return {
         "total_msu": f"{total_msu:,.0f}",
-        "unique_items": str(unique_items),
+        "pde_actual": f"{pde_actual:,.0f}",
         "pde_open": f"{pde_open:,.0f}",
     }
 
@@ -520,6 +534,57 @@ def _build_matrix_tooltip_data(
             "type": "markdown",
         }
         tooltip_rows.append(tip_row)
+    return tooltip_rows
+
+
+def _build_pde_tooltip_data(
+    columns: List[Dict[str, str]],
+    data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Build tooltip_data for PDE alert tables with row and cell context."""
+    if not columns or not data:
+        return []
+
+    col_names = {str(col.get("id", "")): str(col.get("name", col.get("id", ""))) for col in columns}
+    date_col_ids = [
+        str(col.get("id", ""))
+        for col in columns
+        if str(col.get("id", "")) not in ("Requester Email", "Project", TOTAL_LABEL)
+    ]
+
+    tooltip_rows: List[Dict[str, Any]] = []
+    for row in data:
+        requester = str(row.get("Requester Email", "")).strip() or "N/A"
+        project = str(row.get("Project", "")).strip() or "N/A"
+        total = str(row.get(TOTAL_LABEL, "-")).strip() or "-"
+
+        tip_row: Dict[str, Any] = {
+            "Requester Email": {"value": f"**Requester**: {requester}", "type": "markdown"},
+            "Project": {"value": f"**Project**: {project}", "type": "markdown"},
+            TOTAL_LABEL: {
+                "value": (
+                    f"**Requester**: {requester}  \n"
+                    f"**Project**: {project}  \n"
+                    f"**{TOTAL_LABEL}**: {total} MSU"
+                ),
+                "type": "markdown",
+            },
+        }
+
+        for col_id in date_col_ids:
+            value = str(row.get(col_id, "-")).strip() or "-"
+            col_label = col_names.get(col_id, col_id)
+            tip_row[col_id] = {
+                "value": (
+                    f"**Requester**: {requester}  \n"
+                    f"**Project**: {project}  \n"
+                    f"**{col_label}**: {value} MSU"
+                ),
+                "type": "markdown",
+            }
+
+        tooltip_rows.append(tip_row)
+
     return tooltip_rows
 
 
@@ -3325,7 +3390,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     pde_alerts = pd.DataFrame(data_bundle["pde_alerts"])
     request_details = load_request_details(cfg)
     details_version = data_bundle.get("request_details_version")
-    metrics = compute_metrics(monthly_item, pde_alerts)
+    metrics = compute_metrics(monthly_item, pde_alerts, request_details)
     role_options = build_role_options(monthly_requester)
     default_role = role_options[0]["value"] if role_options else ROLE_ALL_VALUE
     role_matrix_columns, role_matrix_data = build_monthly_matrix(monthly_requester, ROLE_ALL_VALUE)
@@ -3395,8 +3460,8 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         html.Span(metrics["total_msu"], id="metric-total-msu", className="metric-value"),
                     ]),
                     html.Div([
-                        html.H4("Item Text"),
-                        html.Span(metrics["unique_items"], id="metric-item-count", className="metric-value"),
+                        html.H4("Actual PDE (<=0 days)"),
+                        html.Span(metrics["pde_actual"], id="metric-pde-actual", className="metric-value warning"),
                     ]),
                     html.Div([
                         html.H4("PDE Alerts（Coming 7days）"),
@@ -3496,6 +3561,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         id="pde-table",
                         columns=pde_columns,
                         data=pde_data,
+                        tooltip_data=_build_pde_tooltip_data(pde_columns, pde_data),
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
@@ -3517,6 +3583,11 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 "width": "auto",
                             },
                         ],
+                        sort_action="native",
+                        sort_mode="single",
+                        sort_by=[{"column_id": TOTAL_LABEL, "direction": "desc"}],
+                        tooltip_delay=200,
+                        tooltip_duration=None,
                         page_size=10,
                         style_table={"overflowX": "auto"},
                     ),
@@ -3525,6 +3596,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         id="pde-fg-table",
                         columns=pde_fg_columns,
                         data=pde_fg_data,
+                        tooltip_data=_build_pde_tooltip_data(pde_fg_columns, pde_fg_data),
                         style_header=PDE_STYLE_HEADER,
                         style_cell=PDE_STYLE_CELL,
                         style_data_conditional=PDE_STYLE_DATA_CONDITIONAL,
@@ -3546,6 +3618,11 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                 "width": "auto",
                             },
                         ],
+                        sort_action="native",
+                        sort_mode="single",
+                        sort_by=[{"column_id": TOTAL_LABEL, "direction": "desc"}],
+                        tooltip_delay=200,
+                        tooltip_duration=None,
                         page_size=10,
                         style_table={"overflowX": "auto"},
                     ),
@@ -4755,15 +4832,16 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
 
     @app.callback(
         Output("metric-total-msu", "children"),
-        Output("metric-item-count", "children"),
+        Output("metric-pde-actual", "children"),
         Output("metric-pde-open", "children"),
         Input("data-store", "data"),
     )
     def update_metrics(data):
         monthly_item = pd.DataFrame(data.get("monthly_item", []))
         pde_alerts = pd.DataFrame(data.get("pde_alerts", []))
-        metrics = compute_metrics(monthly_item, pde_alerts)
-        return metrics["total_msu"], metrics["unique_items"], metrics["pde_open"]
+        request_details = load_request_details(cfg)
+        metrics = compute_metrics(monthly_item, pde_alerts, request_details)
+        return metrics["total_msu"], metrics["pde_actual"], metrics["pde_open"]
 
     @app.callback(
         Output("role-item-table", "columns"),
@@ -4772,8 +4850,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("role-trend", "figure"),
         Output("pde-table", "columns"),
         Output("pde-table", "data"),
+        Output("pde-table", "tooltip_data"),
         Output("pde-fg-table", "columns"),
         Output("pde-fg-table", "data"),
+        Output("pde-fg-table", "tooltip_data"),
         Output("drill-requester-filter", "options"),
         Output("drill-requester-filter", "value"),
         Output("drill-mrp-filter", "options"),
@@ -4853,6 +4933,8 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         ]
         role_fig = build_role_trend(monthly_requester, selected_role)
         pde_columns, pde_records, pde_fg_columns, pde_fg_records = build_pde_tables(pde_alerts, request_details)
+        pde_tooltip_data = _build_pde_tooltip_data(pde_columns, pde_records)
+        pde_fg_tooltip_data = _build_pde_tooltip_data(pde_fg_columns, pde_fg_records)
         drill_columns, drill_rows = build_role_item_project_summary(
             request_details,
             selected_drill_role,
@@ -4946,8 +5028,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             role_fig,
             pde_columns,
             pde_records,
+            pde_tooltip_data,
             pde_fg_columns,
             pde_fg_records,
+            pde_fg_tooltip_data,
             drill_requester_options,
             valid_requesters,
             drill_mrp_options,
