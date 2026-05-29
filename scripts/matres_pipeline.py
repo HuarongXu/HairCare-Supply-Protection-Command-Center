@@ -39,6 +39,8 @@ PROCESSED_FILES = {
     "td_validation_gap_detail": "td_version_gap_details.csv",
     "production_data": "production_data_summary.csv",
     "production_data_by_level": "production_data_summary_by_level.csv",
+    "production_data_weekly": "production_data_summary_weekly.csv",
+    "production_data_by_level_weekly": "production_data_summary_by_level_weekly.csv",
     "td_demand_by_dimension": "td_demand_by_dimension.csv",
     "production_version_compare": "production_version_comparison.csv",
 }
@@ -188,10 +190,29 @@ def _parse_numeric_series(series: pd.Series) -> pd.Series:
 
 def _sort_month_values(values: Iterable[str]) -> list[str]:
     """Sort month labels (YYYY-MM) chronologically."""
+    normalized_values = {str(v).strip() for v in values if str(v).strip()}
+    valid_values: list[str] = []
+    invalid_values: list[str] = []
+
+    for value in normalized_values:
+        try:
+            pd.Period(value, freq="M")
+            valid_values.append(value)
+        except Exception:
+            invalid_values.append(value)
+
+    if invalid_values:
+        logging.warning(
+            "Ignored %s invalid month label(s): %s",
+            len(invalid_values),
+            ", ".join(sorted(invalid_values)),
+        )
+
     def key_func(value: str):
-        parsed = pd.Period(str(value), freq="M")
+        parsed = pd.Period(value, freq="M")
         return parsed.start_time
-    return sorted({str(v) for v in values if str(v).strip()}, key=key_func)
+
+    return sorted(valid_values, key=key_func)
 
 
 def _normalize_month_label(raw_label: str) -> Optional[str]:
@@ -200,11 +221,83 @@ def _normalize_month_label(raw_label: str) -> Optional[str]:
     dot_match = re.fullmatch(r"(\d{2})\.(\d{4})", text)
     if dot_match:
         month, year = dot_match.groups()
+        if not (1 <= int(month) <= 12):
+            return None
         return f"{year}-{month}"
     dash_match = re.fullmatch(r"(\d{4})-(\d{2})", text)
     if dash_match:
+        _, month = dash_match.groups()
+        if not (1 <= int(month) <= 12):
+            return None
         return text
     return None
+
+
+def _normalize_week_label(raw_label: str) -> Optional[str]:
+    """Normalise week label from either WW.YYYY or YYYY-WWW/ YYYY-WW."""
+    text = str(raw_label).strip()
+
+    dot_match = re.fullmatch(r"(\d{1,2})\.(\d{4})", text)
+    if dot_match:
+        week, year = dot_match.groups()
+        week_num = int(week)
+        if not (1 <= week_num <= 53):
+            return None
+        return f"{year}-W{week_num:02d}"
+
+    dash_match = re.fullmatch(r"(\d{4})-W?(\d{1,2})", text, flags=re.IGNORECASE)
+    if dash_match:
+        year, week = dash_match.groups()
+        week_num = int(week)
+        if not (1 <= week_num <= 53):
+            return None
+        return f"{year}-W{week_num:02d}"
+
+    return None
+
+
+def _sort_week_values(values: Iterable[str]) -> list[str]:
+    """Sort week labels (YYYY-WWW/ YYYY-WW) chronologically."""
+    normalized_values = {str(v).strip() for v in values if str(v).strip()}
+    valid_values: list[str] = []
+    invalid_values: list[str] = []
+
+    for value in normalized_values:
+        match = re.fullmatch(r"(\d{4})-W(\d{2})", value)
+        if not match:
+            invalid_values.append(value)
+            continue
+        _, week = match.groups()
+        if 1 <= int(week) <= 53:
+            valid_values.append(value)
+        else:
+            invalid_values.append(value)
+
+    if invalid_values:
+        logging.warning(
+            "Ignored %s invalid week label(s): %s",
+            len(invalid_values),
+            ", ".join(sorted(invalid_values)),
+        )
+
+    def key_func(value: str):
+        year, week = value.split("-W")
+        return int(year), int(week)
+
+    return sorted(valid_values, key=key_func)
+
+
+def _week_label_to_month_label(week_label: str) -> Optional[str]:
+    """Map ISO week label (YYYY-WW) to its week-start month label (YYYY-MM)."""
+    match = re.fullmatch(r"(\d{4})-W(\d{2})", str(week_label).strip())
+    if not match:
+        return None
+    year, week = match.groups()
+    try:
+        week_start = pd.to_datetime(f"{year}-W{week}-1", format="%G-W%V-%u", errors="raise")
+    except Exception:
+        return None
+    return week_start.to_period("M").strftime("%Y-%m")
 
 
 def _pick_column(
@@ -223,6 +316,28 @@ def _pick_column(
             if all(token in key for token in contains):
                 return col
     return None
+
+
+def _deduplicate_weekly_reports(reports: list[Path]) -> list[Path]:
+    """Keep only the latest-dated file for each weekly report type.
+
+    Files follow patterns like ``HP Production Vol_Weekly_20260529.xls``.
+    Multiple dates of the same type contain cumulative data, so only
+    the newest file per type should be used to avoid double-counting.
+    """
+    import re as _re
+
+    type_map: dict[str, tuple[str, Path]] = {}
+    for p in reports:
+        m = _re.search(r"(\d{8})\.\w+$", p.name)
+        if not m:
+            type_map.setdefault(p.name, ("", p))
+            continue
+        date_str = m.group(1)
+        type_key = p.name[: m.start()].strip("_ ")
+        if type_key not in type_map or date_str > type_map[type_key][0]:
+            type_map[type_key] = (date_str, p)
+    return sorted(v[1] for v in type_map.values())
 
 
 def _discover_production_reports(root: Path) -> tuple[list[Path], list[Path]]:
@@ -726,6 +841,8 @@ def build_production_data_summary(
         production_vol_reports = vol_report_files if vol_report_files is not None else []
     else:
         mtd_reports, production_vol_reports = _discover_production_reports(root)
+        # Exclude weekly files from the monthly summary
+        production_vol_reports = [p for p in production_vol_reports if "weekly" not in p.name.lower()]
 
     if not mtd_reports:
         logging.warning("No MTD report found under %s", root)
@@ -889,8 +1006,9 @@ def build_production_data_summary(
             bottle_mask = working.get("is_bottle_line", False)
             if not isinstance(bottle_mask, pd.Series):
                 bottle_mask = pd.Series(False, index=working.index)
-            removed_non_bottle = int((~bottle_mask.fillna(False)).sum())
-            working = working[bottle_mask.fillna(False)].copy()
+            bottle_mask = bottle_mask.eq(True)
+            removed_non_bottle = int((~bottle_mask).sum())
+            working = working[bottle_mask].copy()
             if removed_non_bottle > 0:
                 logging.info(
                     "XQTC file %s removed %s non-Bottle-Line rows by Parameter Technology",
@@ -1000,6 +1118,8 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
     mtd_reports, production_vol_reports = _discover_production_reports(root)
+    # Exclude weekly files from the monthly summary
+    production_vol_reports = [p for p in production_vol_reports if "weekly" not in p.name.lower()]
 
     if not production_vol_reports:
         logging.warning("No Production Vol report found under %s", root)
@@ -1181,8 +1301,9 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
             bottle_mask = working.get("is_bottle_line", False)
             if not isinstance(bottle_mask, pd.Series):
                 bottle_mask = pd.Series(False, index=working.index)
-            removed_non_bottle = int((~bottle_mask.fillna(False)).sum())
-            working = working[bottle_mask.fillna(False)].copy()
+            bottle_mask = bottle_mask.eq(True)
+            removed_non_bottle = int((~bottle_mask).sum())
+            working = working[bottle_mask].copy()
             if removed_non_bottle > 0:
                 logging.info(
                     "XQTC file %s removed %s non-Bottle-Line rows by Parameter Technology",
@@ -1291,6 +1412,585 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     return result
 
 
+def build_production_data_summary_weekly(root: Path, cfg: PipelineConfig) -> pd.DataFrame:
+    base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
+
+    mtd_reports, all_production_vol_reports = _discover_production_reports(root)
+    production_vol_reports = _deduplicate_weekly_reports(
+        [p for p in all_production_vol_reports if "weekly" in p.name.lower()]
+    )
+
+    if not mtd_reports:
+        logging.warning("No MTD report found under %s", root)
+    if not production_vol_reports:
+        logging.warning("No weekly Production Vol report found under %s", root)
+    if not mtd_reports and not production_vol_reports:
+        return pd.DataFrame(columns=base_columns)
+
+    mtd_monthly_frames: list[pd.DataFrame] = []
+    for report_path in mtd_reports:
+        try:
+            raw = read_production_schedule_report(report_path)
+        except Exception:
+            logging.exception("Failed to read MTD report from %s", report_path)
+            continue
+
+        if raw.empty:
+            continue
+
+        raw = standardize_column_names(raw)
+        start_date_col = _pick_column(raw, ["startdate", "start date"], ["start", "date"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        deliv_col = _pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
+        required_cols = [start_date_col, plant_col, deliv_col]
+        if any(col is None for col in required_cols):
+            logging.warning("MTD report missing required columns in %s", report_path)
+            continue
+
+        working = raw[[start_date_col, plant_col, deliv_col]].copy()
+        working.columns = ["StartDate", "Plant", "Deliv. Quantity"]
+        working["StartDateParsed"] = pd.to_datetime(working["StartDate"], errors="coerce")
+        working = working[working["StartDateParsed"].notna()].copy()
+        if working.empty:
+            continue
+
+        deliv_qty = _parse_numeric_series(working["Deliv. Quantity"])
+        working["mtd_qty"] = deliv_qty / 1000.0
+        working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        working = working[working["Plant"] != ""].copy()
+        if working.empty:
+            continue
+
+        working["Month"] = working["StartDateParsed"].dt.to_period("M").astype(str)
+        monthly = (
+            working.groupby(["Plant", "Month"], dropna=False)["mtd_qty"]
+            .sum(min_count=1)
+            .reset_index()
+            .rename(columns={"mtd_qty": "MTD_VALUE"})
+        )
+        mtd_monthly_frames.append(monthly)
+
+    if mtd_monthly_frames:
+        mtd_monthly = (
+            pd.concat(mtd_monthly_frames, ignore_index=True)
+            .groupby(["Plant", "Month"], dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+    else:
+        mtd_monthly = pd.DataFrame(columns=["Plant", "Month", "MTD_VALUE"])
+
+    production_vol_frames: list[pd.DataFrame] = []
+    week_labels: set[str] = set()
+    xqtc_9su_mapping = read_xqtc_9su_mapping(root)
+
+    for report_path in production_vol_reports:
+        try:
+            raw = read_production_volume_report(report_path)
+        except Exception:
+            logging.exception("Failed to read weekly Production Vol report from %s", report_path)
+            continue
+
+        if raw.empty:
+            continue
+
+        category_col = _pick_column(raw, ["categories / members"], ["categories"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = _pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
+        prev_perd_col = _pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
+        d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
+        if category_col is None or plant_col is None or material_col is None or mrp_elements_col is None or prev_perd_col is None:
+            logging.warning("Weekly Production Vol report missing required columns (Category/Plant/Material/MRP Elements): %s", report_path)
+            continue
+
+        week_col_map: Dict[str, str] = {}
+        passed_prev_perd = False
+        for col in raw.columns:
+            if col == prev_perd_col:
+                passed_prev_perd = True
+                continue
+            if not passed_prev_perd:
+                continue
+            normalized = _normalize_week_label(str(col).strip())
+            if normalized:
+                week_col_map[col] = normalized
+
+        if not week_col_map:
+            logging.warning("Weekly Production Vol report has no weekly columns: %s", report_path)
+            continue
+
+        select_cols = [category_col, plant_col, material_col, mrp_elements_col, *week_col_map.keys()]
+        if d_filter_col is not None and d_filter_col not in select_cols:
+            select_cols.append(d_filter_col)
+        working = raw[select_cols].copy()
+
+        rename_base = {
+            category_col: "Category",
+            plant_col: "Plant",
+            material_col: "Material",
+            mrp_elements_col: "MRP Elements",
+        }
+        if d_filter_col is not None and d_filter_col in working.columns and d_filter_col != plant_col:
+            rename_base[d_filter_col] = "_D_FILTER"
+        working = working.rename(columns=rename_base)
+
+        working["Category"] = working["Category"].fillna("").astype(str).str.strip()
+        working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        working["Material"] = working["Material"].fillna("").astype(str).str.strip()
+        working["MRP Elements"] = working["MRP Elements"].fillna("").astype(str).str.strip()
+        if "_D_FILTER" in working.columns:
+            working["_D_FILTER"] = working["_D_FILTER"].fillna("").astype(str).str.strip()
+
+        before_mrp_rows = len(working)
+        working = working[
+            working["Category"].str.replace(" ", "", regex=False).str.lower().eq("2.0production/receipts")
+            & working["MRP Elements"].str.replace(" ", "", regex=False).str.lower().isin(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS)
+            & working["Plant"].ne("")
+            & working["Material"].ne("")
+            & (working["_D_FILTER"].ne("") if "_D_FILTER" in working.columns else True)
+        ].copy()
+        removed_by_mrp = before_mrp_rows - len(working)
+        if removed_by_mrp > 0:
+            logging.info(
+                "Weekly Production Vol file %s removed %s rows by MRP Elements filter (%s). %s",
+                report_path,
+                removed_by_mrp,
+                sorted(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS),
+                PRODUCTION_VOL_OTHER_EXCLUSION_REASON,
+            )
+        if working.empty:
+            continue
+
+        rename_map = {source_col: week_label for source_col, week_label in week_col_map.items()}
+        working = working.rename(columns=rename_map)
+
+        normalized_week_cols = _sort_week_values({label for label in rename_map.values()})
+        report_name_lower = report_path.name.lower()
+        is_xqtc_report = "xqtc" in report_name_lower
+        is_xqtc_wip = is_xqtc_report and "wip" in report_name_lower
+
+        if is_xqtc_report:
+            working["material_key"] = working["Material"].apply(normalize_material_key)
+            working = working[working["material_key"].astype(bool)].copy()
+            if working.empty:
+                continue
+
+            working = working.merge(xqtc_9su_mapping, on="material_key", how="left")
+            bottle_mask = working.get("is_bottle_line", False)
+            if not isinstance(bottle_mask, pd.Series):
+                bottle_mask = pd.Series(False, index=working.index)
+            bottle_mask = bottle_mask.eq(True)
+            removed_non_bottle = int((~bottle_mask).sum())
+            working = working[bottle_mask].copy()
+            if removed_non_bottle > 0:
+                logging.info(
+                    "XQTC weekly file %s removed %s non-Bottle-Line rows by Parameter Technology",
+                    report_path,
+                    removed_non_bottle,
+                )
+            if working.empty:
+                continue
+
+        if is_xqtc_wip:
+            missing_su9 = working.get("su9", pd.Series(dtype=float)).isna().sum()
+            if missing_su9 > 0:
+                logging.warning(
+                    "XQTC weekly WIP file %s has %s materials without 9字头SU mapping; treated as 0",
+                    report_path,
+                    int(missing_su9),
+                )
+
+        for week_col in normalized_week_cols:
+            week_values = _parse_numeric_series(working[week_col])
+            if is_xqtc_wip:
+                su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
+                working[week_col] = week_values * su9_values / 1000.0
+            elif is_xqtc_report:
+                working[week_col] = week_values / 1000.0
+            else:
+                working[week_col] = week_values
+            week_labels.add(week_col)
+
+        grouped = (
+            working.groupby("Plant", dropna=False)[normalized_week_cols]
+            .sum(min_count=1)
+            .reset_index()
+        )
+        production_vol_frames.append(grouped)
+
+    if production_vol_frames:
+        production_vol = (
+            pd.concat(production_vol_frames, ignore_index=True)
+            .groupby("Plant", dropna=False)
+            .sum(min_count=1)
+            .reset_index()
+        )
+    else:
+        production_vol = pd.DataFrame(columns=["Plant"])
+
+    week_window = _sort_week_values(week_labels)
+    if not week_window:
+        return pd.DataFrame(columns=base_columns)
+
+    current_week = week_window[0]
+    current_month_label = _week_label_to_month_label(current_week)
+    if current_week not in production_vol.columns:
+        production_vol[current_week] = 0.0
+
+    if current_month_label:
+        mtd_current = mtd_monthly[mtd_monthly["Month"].astype(str) == current_month_label].copy()
+    else:
+        mtd_current = pd.DataFrame(columns=["Plant", "Month", "MTD_VALUE"])
+
+    if not mtd_current.empty:
+        mtd_current = (
+            mtd_current.groupby("Plant", dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+    else:
+        mtd_current = pd.DataFrame(columns=["Plant", "MTD_VALUE"])
+
+    result = production_vol.merge(mtd_current, on="Plant", how="outer")
+    result["Plant"] = result["Plant"].fillna("").astype(str).str.strip()
+    result = result[result["Plant"] != ""].copy()
+    if result.empty:
+        return pd.DataFrame(columns=base_columns)
+
+    result["MTD_VALUE"] = pd.to_numeric(result.get("MTD_VALUE", 0.0), errors="coerce").fillna(0.0)
+    result["Left Production_VALUE"] = pd.to_numeric(result.get(current_week, 0.0), errors="coerce").fillna(0.0)
+    result["Current Month Total_VALUE"] = result["MTD_VALUE"] + result["Left Production_VALUE"]
+
+    for week in week_window:
+        result[week] = pd.to_numeric(result.get(week, 0.0), errors="coerce").fillna(0.0)
+
+    result["MTD"] = result["MTD_VALUE"]
+    result["Left Production"] = result["Left Production_VALUE"]
+    result["Current Month Total"] = result["Current Month Total_VALUE"]
+    result[current_week] = result["Left Production"]
+    result["Level1"] = "ALL"
+    result["Level2"] = "ALL"
+
+    ordered_cols = [
+        "Plant",
+        "Level1",
+        "Level2",
+        "MTD",
+        "Left Production",
+        "Current Month Total",
+        *week_window,
+        "MTD_VALUE",
+        "Left Production_VALUE",
+        "Current Month Total_VALUE",
+    ]
+    result = result[ordered_cols].copy()
+    result = result.sort_values(["Plant", "Level1", "Level2"], ascending=[True, True, True]).reset_index(drop=True)
+    return result
+
+
+def build_production_data_summary_by_level_weekly(root: Path, cfg: PipelineConfig) -> pd.DataFrame:
+    base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
+
+    mtd_reports, all_production_vol_reports = _discover_production_reports(root)
+    production_vol_reports = _deduplicate_weekly_reports(
+        [p for p in all_production_vol_reports if "weekly" in p.name.lower()]
+    )
+
+    if not production_vol_reports:
+        logging.warning("No weekly Production Vol report found under %s", root)
+        return pd.DataFrame(columns=base_columns)
+
+    level1_mapping = read_level1_mapping(cfg)
+    level1_col = cfg.level1_first_level_column
+    if level1_col not in level1_mapping.columns:
+        level1_mapping = pd.DataFrame(columns=["material_key", "Level1"])
+    else:
+        level1_mapping = level1_mapping.rename(columns={level1_col: "Level1"})
+    level2_mapping = read_second_level_mapping(cfg)
+
+    mtd_monthly_frames: list[pd.DataFrame] = []
+    for report_path in mtd_reports:
+        try:
+            raw = read_production_schedule_report(report_path)
+        except Exception:
+            logging.exception("Failed to read MTD report from %s", report_path)
+            continue
+
+        if raw.empty:
+            continue
+
+        raw = standardize_column_names(raw)
+        start_date_col = _pick_column(raw, ["startdate", "start date"], ["start", "date"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material", "material number"], ["material"])
+        deliv_col = _pick_column(raw, ["deliv. quantity", "delivery quantity"], ["deliv", "quantity"])
+        required_cols = [start_date_col, plant_col, material_col, deliv_col]
+        if any(col is None for col in required_cols):
+            logging.warning("MTD report missing required columns in %s", report_path)
+            continue
+
+        working = raw[[start_date_col, plant_col, material_col, deliv_col]].copy()
+        working.columns = ["StartDate", "Plant", "Material", "Deliv. Quantity"]
+        working["StartDateParsed"] = pd.to_datetime(working["StartDate"], errors="coerce")
+        working = working[working["StartDateParsed"].notna()].copy()
+        if working.empty:
+            continue
+
+        working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        working["Material"] = working["Material"].fillna("").astype(str).str.strip()
+        working = working[working["Plant"] != ""].copy()
+        working = working[working["Material"] != ""].copy()
+        if working.empty:
+            continue
+
+        deliv_qty = _parse_numeric_series(working["Deliv. Quantity"])
+        working["MTD_VALUE"] = deliv_qty / 1000.0
+        working["Month"] = working["StartDateParsed"].dt.to_period("M").astype(str)
+
+        working["material_key"] = working["Material"].apply(normalize_material_key)
+        working = working[working["material_key"].astype(bool)].copy()
+        if working.empty:
+            continue
+
+        working = working.merge(level1_mapping, on="material_key", how="left")
+        working = working.merge(level2_mapping, on="material_key", how="left")
+        working["Level1"] = working.get("Level1", "").fillna("").astype(str).str.strip()
+        working["Level2"] = working.get("Level2", "").fillna("").astype(str).str.strip()
+        working.loc[working["Level1"] == "", "Level1"] = "未映射"
+        working.loc[working["Level2"] == "", "Level2"] = "未映射"
+
+        monthly = (
+            working.groupby(["Plant", "Level1", "Level2", "Month"], dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+        mtd_monthly_frames.append(monthly)
+
+    if mtd_monthly_frames:
+        mtd_monthly = (
+            pd.concat(mtd_monthly_frames, ignore_index=True)
+            .groupby(["Plant", "Level1", "Level2", "Month"], dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+    else:
+        mtd_monthly = pd.DataFrame(columns=["Plant", "Level1", "Level2", "Month", "MTD_VALUE"])
+
+    detail_frames: list[pd.DataFrame] = []
+    week_labels: set[str] = set()
+    xqtc_9su_mapping = read_xqtc_9su_mapping(root)
+
+    for report_path in production_vol_reports:
+        try:
+            raw = read_production_volume_report(report_path)
+        except Exception:
+            logging.exception("Failed to read weekly Production Vol report from %s", report_path)
+            continue
+
+        if raw.empty:
+            continue
+
+        category_col = _pick_column(raw, ["categories / members"], ["categories"])
+        plant_col = _pick_column(raw, ["plant"], ["plant"])
+        material_col = _pick_column(raw, ["material"], ["material"])
+        mrp_elements_col = _pick_column(raw, ["mrp elements", "mrp element"], ["mrp", "element"])
+        prev_perd_col = _pick_column(raw, ["prev.perd", "prev perd"], ["prev", "perd"])
+        d_filter_col = raw.columns[2] if len(raw.columns) > 2 else None
+        if any(col is None for col in [category_col, plant_col, material_col, mrp_elements_col, prev_perd_col]):
+            logging.warning("Weekly Production Vol detail report missing required columns (Category/Plant/Material/MRP Elements) in %s", report_path)
+            continue
+
+        week_col_map: Dict[str, str] = {}
+        passed_prev_perd = False
+        for col in raw.columns:
+            if col == prev_perd_col:
+                passed_prev_perd = True
+                continue
+            if not passed_prev_perd:
+                continue
+            normalized = _normalize_week_label(str(col).strip())
+            if normalized:
+                week_col_map[col] = normalized
+
+        if not week_col_map:
+            continue
+
+        select_cols = [category_col, plant_col, material_col, mrp_elements_col, *week_col_map.keys()]
+        if d_filter_col is not None and d_filter_col not in select_cols:
+            select_cols.append(d_filter_col)
+        working = raw[select_cols].copy()
+        rename_base = {
+            category_col: "Category",
+            plant_col: "Plant",
+            material_col: "Material",
+            mrp_elements_col: "MRP Elements",
+        }
+        if d_filter_col is not None and d_filter_col in working.columns and d_filter_col != plant_col:
+            rename_base[d_filter_col] = "_D_FILTER"
+        working = working.rename(columns=rename_base)
+
+        working["Category"] = working["Category"].fillna("").astype(str).str.strip()
+        working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+        working["Material"] = working["Material"].fillna("").astype(str).str.strip()
+        working["MRP Elements"] = working["MRP Elements"].fillna("").astype(str).str.strip()
+        if "_D_FILTER" in working.columns:
+            working["_D_FILTER"] = working["_D_FILTER"].fillna("").astype(str).str.strip()
+
+        before_mrp_rows = len(working)
+        working = working[
+            working["Category"].str.replace(" ", "", regex=False).str.lower().eq("2.0production/receipts")
+            & working["MRP Elements"].str.replace(" ", "", regex=False).str.lower().isin(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS)
+            & working["Plant"].ne("")
+            & working["Material"].ne("")
+            & (working["_D_FILTER"].ne("") if "_D_FILTER" in working.columns else True)
+        ].copy()
+        removed_by_mrp = before_mrp_rows - len(working)
+        if removed_by_mrp > 0:
+            logging.info(
+                "Weekly Production Vol detail file %s removed %s rows by MRP Elements filter (%s). %s",
+                report_path,
+                removed_by_mrp,
+                sorted(PRODUCTION_VOL_ALLOWED_MRP_ELEMENTS),
+                PRODUCTION_VOL_OTHER_EXCLUSION_REASON,
+            )
+        if working.empty:
+            continue
+
+        working["material_key"] = working["Material"].apply(normalize_material_key)
+        working = working[working["material_key"].astype(bool)].copy()
+        if working.empty:
+            continue
+
+        rename_map = {source_col: week_label for source_col, week_label in week_col_map.items()}
+        working = working.rename(columns=rename_map)
+        normalized_week_cols = _sort_week_values({label for label in rename_map.values()})
+
+        report_name_lower = report_path.name.lower()
+        is_xqtc_report = "xqtc" in report_name_lower
+        is_xqtc_wip = is_xqtc_report and "wip" in report_name_lower
+
+        if is_xqtc_report:
+            working = working.merge(xqtc_9su_mapping, on="material_key", how="left")
+            bottle_mask = working.get("is_bottle_line", False)
+            if not isinstance(bottle_mask, pd.Series):
+                bottle_mask = pd.Series(False, index=working.index)
+            bottle_mask = bottle_mask.eq(True)
+            removed_non_bottle = int((~bottle_mask).sum())
+            working = working[bottle_mask].copy()
+            if removed_non_bottle > 0:
+                logging.info(
+                    "XQTC weekly file %s removed %s non-Bottle-Line rows by Parameter Technology",
+                    report_path,
+                    removed_non_bottle,
+                )
+            if working.empty:
+                continue
+
+        if is_xqtc_wip:
+            missing_su9 = working.get("su9", pd.Series(dtype=float)).isna().sum()
+            if missing_su9 > 0:
+                logging.warning(
+                    "XQTC weekly WIP file %s has %s materials without 9字头SU mapping; treated as 0",
+                    report_path,
+                    int(missing_su9),
+                )
+
+        for week_col in normalized_week_cols:
+            week_values = _parse_numeric_series(working[week_col])
+            if is_xqtc_wip:
+                su9_values = pd.to_numeric(working.get("su9", 0.0), errors="coerce").fillna(0.0)
+                working[week_col] = week_values * su9_values / 1000.0
+            elif is_xqtc_report:
+                working[week_col] = week_values / 1000.0
+            else:
+                working[week_col] = week_values
+            week_labels.add(week_col)
+
+        working = working.merge(level1_mapping, on="material_key", how="left")
+        working = working.merge(level2_mapping, on="material_key", how="left")
+        working["Level1"] = working.get("Level1", "").fillna("").astype(str).str.strip()
+        working["Level2"] = working.get("Level2", "").fillna("").astype(str).str.strip()
+        working.loc[working["Level1"] == "", "Level1"] = "未映射"
+        working.loc[working["Level2"] == "", "Level2"] = "未映射"
+
+        grouped = (
+            working.groupby(["Plant", "Level1", "Level2"], dropna=False)[normalized_week_cols]
+            .sum(min_count=1)
+            .reset_index()
+        )
+        detail_frames.append(grouped)
+
+    if not detail_frames:
+        return pd.DataFrame(columns=base_columns)
+
+    result = (
+        pd.concat(detail_frames, ignore_index=True)
+        .groupby(["Plant", "Level1", "Level2"], dropna=False)
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    week_window = _sort_week_values(week_labels)
+    if not week_window:
+        return pd.DataFrame(columns=base_columns)
+
+    current_week = week_window[0]
+    current_month_label = _week_label_to_month_label(current_week)
+
+    for week in week_window:
+        result[week] = pd.to_numeric(result.get(week, 0.0), errors="coerce").fillna(0.0)
+
+    if current_month_label:
+        mtd_current = mtd_monthly[mtd_monthly["Month"].astype(str) == current_month_label].copy()
+    else:
+        mtd_current = pd.DataFrame(columns=["Plant", "Level1", "Level2", "Month", "MTD_VALUE"])
+
+    if not mtd_current.empty:
+        mtd_current = (
+            mtd_current.groupby(["Plant", "Level1", "Level2"], dropna=False)["MTD_VALUE"]
+            .sum(min_count=1)
+            .reset_index()
+        )
+    else:
+        mtd_current = pd.DataFrame(columns=["Plant", "Level1", "Level2", "MTD_VALUE"])
+
+    result = result.merge(mtd_current, on=["Plant", "Level1", "Level2"], how="outer")
+    result["Plant"] = result["Plant"].fillna("").astype(str).str.strip()
+    result["Level1"] = result["Level1"].fillna("").astype(str).str.strip()
+    result["Level2"] = result["Level2"].fillna("").astype(str).str.strip()
+    result = result[result["Plant"] != ""].copy()
+    result.loc[result["Level1"] == "", "Level1"] = "未映射"
+    result.loc[result["Level2"] == "", "Level2"] = "未映射"
+
+    result["MTD_VALUE"] = pd.to_numeric(result.get("MTD_VALUE", 0.0), errors="coerce").fillna(0.0)
+    result["Left Production_VALUE"] = pd.to_numeric(result.get(current_week, 0.0), errors="coerce").fillna(0.0)
+    result["Current Month Total_VALUE"] = result["MTD_VALUE"] + result["Left Production_VALUE"]
+
+    result["MTD"] = result["MTD_VALUE"]
+    result["Left Production"] = result["Left Production_VALUE"]
+    result["Current Month Total"] = result["Current Month Total_VALUE"]
+    result[current_week] = result["Left Production"]
+
+    ordered_cols = [
+        "Plant",
+        "Level1",
+        "Level2",
+        "MTD",
+        "Left Production",
+        "Current Month Total",
+        *week_window,
+        "MTD_VALUE",
+        "Left Production_VALUE",
+        "Current Month Total_VALUE",
+    ]
+    result = result[ordered_cols].copy()
+    total_check_cols = ["MTD", "Left Production", "Current Month Total", *week_window]
+    result = result[result[total_check_cols].abs().sum(axis=1) > 0].copy()
+    result = result.sort_values(["Plant", "Level1", "Level2"], ascending=[True, True, True]).reset_index(drop=True)
+    return result
+
+
 def build_production_version_comparison(root: Path, cfg: PipelineConfig) -> pd.DataFrame:
     """Compare the two latest dated production data sets (by plant).
 
@@ -1315,7 +2015,7 @@ def build_production_version_comparison(root: Path, cfg: PipelineConfig) -> pd.D
         name_lower = p.name.lower()
         if "mtd" in name_lower and "production vol" not in name_lower:
             date_groups[date_str]["mtd"].append(p)
-        elif "production vol" in name_lower:
+        elif "production vol" in name_lower and "weekly" not in name_lower:
             date_groups[date_str]["vol"].append(p)
 
     sorted_dates = sorted(date_groups.keys())
@@ -1696,7 +2396,8 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
             bottle_mask = working.get("is_bottle_line", False)
             if not isinstance(bottle_mask, pd.Series):
                 bottle_mask = pd.Series(False, index=working.index)
-            working = working[bottle_mask.fillna(False)].copy()
+            bottle_mask = bottle_mask.eq(True)
+            working = working[bottle_mask].copy()
             if working.empty:
                 continue
 
@@ -3309,6 +4010,16 @@ def _run_stage_production(cfg: PipelineConfig) -> None:
 
     production_data_by_level = build_production_data_summary_by_level(cfg.production_data_dir, cfg)
     write_processed_csv(production_data_by_level, cfg.processed_dir, PROCESSED_FILES["production_data_by_level"])
+
+    production_data_weekly = build_production_data_summary_weekly(cfg.production_data_dir, cfg)
+    write_processed_csv(production_data_weekly, cfg.processed_dir, PROCESSED_FILES["production_data_weekly"])
+
+    production_data_by_level_weekly = build_production_data_summary_by_level_weekly(cfg.production_data_dir, cfg)
+    write_processed_csv(
+        production_data_by_level_weekly,
+        cfg.processed_dir,
+        PROCESSED_FILES["production_data_by_level_weekly"],
+    )
 
     td_demand_by_dim = build_td_demand_by_dimension(cfg.data_base_dir, cfg)
     write_processed_csv(td_demand_by_dim, cfg.processed_dir, PROCESSED_FILES["td_demand_by_dimension"])

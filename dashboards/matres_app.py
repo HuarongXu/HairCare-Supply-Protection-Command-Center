@@ -221,7 +221,7 @@ _REFRESH_GROUP_KEYS: Dict[str, List[str]] = {
         "pde_alerts",
     ],
     "td": ["td_validation", "td_validation_detail"],
-    "production": ["production_data", "production_data_by_level", "td_demand_by_dimension", "production_version_compare"],
+    "production": ["production_data", "production_data_by_level", "production_data_weekly", "production_data_by_level_weekly", "td_demand_by_dimension", "production_version_compare"],
 }
 
 
@@ -234,6 +234,8 @@ def _load_single_key(cfg: AppConfig, key: str) -> Any:
         "hc_idp_monthly": lambda: load_dataset(cfg.processed_dir, "hc_idp_monthly_summary.csv"),
         "production_data": lambda: load_dataset(cfg.processed_dir, "production_data_summary.csv"),
         "production_data_by_level": lambda: load_dataset(cfg.processed_dir, "production_data_summary_by_level.csv"),
+        "production_data_weekly": lambda: load_dataset(cfg.processed_dir, "production_data_summary_weekly.csv"),
+        "production_data_by_level_weekly": lambda: load_dataset(cfg.processed_dir, "production_data_summary_by_level_weekly.csv"),
         "td_demand_by_dimension": lambda: load_dataset(cfg.processed_dir, "td_demand_by_dimension.csv"),
         "production_version_compare": lambda: load_dataset(cfg.processed_dir, "production_version_comparison.csv"),
         "td_validation": lambda: load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv"),
@@ -1630,6 +1632,13 @@ def build_production_data_table_by_plant(
 
     display_month_cols = month_cols[1:] if month_cols else []
     grouped["Current Month"] = pd.to_numeric(grouped["Current Month Total"], errors="coerce").fillna(0.0)
+
+    # Only keep months that have non-zero data across all plants
+    display_month_cols = [
+        c for c in display_month_cols
+        if pd.to_numeric(grouped[c], errors="coerce").fillna(0.0).abs().sum() > 0
+    ]
+
     ordered_cols = ["Plant", "MTD", "Left Production", "Current Month", *display_month_cols]
 
     total_numeric_cols = ["MTD", "Left Production", "Current Month", *display_month_cols]
@@ -1826,7 +1835,6 @@ def build_production_data_table_by_plant_level(
     month_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-\d{2}", str(c))])
     display_month_cols = month_cols[1:] if month_cols else []
     numeric_cols = ["MTD", "Left Production", "Current Month Total", *display_month_cols]
-    ordered_cols = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month", *display_month_cols]
 
     for col in numeric_cols:
         if col in working.columns:
@@ -1841,8 +1849,16 @@ def build_production_data_table_by_plant_level(
     )
 
     grouped["Current Month"] = pd.to_numeric(grouped["Current Month Total"], errors="coerce").fillna(0.0)
+
+    # Only keep months that have non-zero data across all rows
+    display_month_cols = [
+        c for c in display_month_cols
+        if pd.to_numeric(grouped[c], errors="coerce").fillna(0.0).abs().sum() > 0
+    ]
+
     grouped = grouped[["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month", *display_month_cols]].copy()
 
+    ordered_cols = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month", *display_month_cols]
     data_numeric_cols = ["MTD", "Left Production", "Current Month", *display_month_cols]
 
     if data_numeric_cols:
@@ -1928,6 +1944,219 @@ def build_production_data_table_by_plant_level(
 
     result_df = pd.DataFrame(result_rows)
     for col in data_numeric_cols:
+        result_df[col] = result_df[col].apply(lambda v: "-" if pd.isna(v) or float(v) == 0.0 else f"{float(v):,.0f}")
+
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, result_df[ordered_cols].to_dict("records")
+
+
+# ---------------------------------------------------------------------------
+# Weekly Production Data table builders
+# ---------------------------------------------------------------------------
+
+def build_production_data_table_by_plant_weekly(
+    df: pd.DataFrame,
+    plant_order: Optional[List[str]] = None,
+    include_segment_totals: bool = True,
+    segment_totals_after: Optional[Dict[str, Tuple[str, List[str]]]] = None,
+    max_weeks: int = 13,
+) -> Tuple[List[Dict], List[Dict]]:
+    """Weekly production by plant. Only week columns, limited to max_weeks from current week."""
+    base_cols = ["Plant"]
+    if df.empty:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    working = df.copy()
+    all_week_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-W\d{2}", str(c))])
+
+    # Determine current ISO week and keep only future max_weeks weeks
+    from datetime import date
+    today = date.today()
+    current_iso = today.isocalendar()
+    current_week_label = f"{current_iso.year}-W{current_iso.week:02d}"
+    week_cols = [c for c in all_week_cols if c >= current_week_label][:max_weeks]
+    if not week_cols:
+        week_cols = all_week_cols[-max_weeks:] if all_week_cols else []
+
+    if not week_cols:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    if "Plant" not in working.columns:
+        working["Plant"] = ""
+    working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+
+    for col in week_cols:
+        if col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+        else:
+            working[col] = 0.0
+
+    grouped = (
+        working.groupby(["Plant"], dropna=False)[week_cols]
+        .sum(min_count=1)
+        .reset_index()
+    )
+    grouped = grouped[grouped["Plant"] != ""].copy()
+    if grouped.empty:
+        columns = [{"name": col, "id": col} for col in ["Plant", *week_cols]]
+        return columns, []
+    grouped = grouped[grouped[week_cols].abs().sum(axis=1) > 0].copy()
+
+    ordered_cols = ["Plant", *week_cols]
+    grouped = grouped[ordered_cols].copy()
+
+    if plant_order:
+        allowed_plants = {str(p).strip() for p in plant_order}
+        grouped = grouped[grouped["Plant"].astype(str).str.strip().isin(allowed_plants)].copy()
+        if grouped.empty:
+            columns = [{"name": col, "id": col} for col in ordered_cols]
+            return columns, []
+
+    def sum_for_plants(plants: List[str]) -> pd.Series:
+        subset = grouped[grouped["Plant"].isin(plants)]
+        if subset.empty:
+            return pd.Series({col: 0.0 for col in week_cols})
+        return subset[week_cols].apply(pd.to_numeric, errors="coerce").fillna(0.0).sum(min_count=1)
+
+    ordered_rows: List[Dict[str, Any]] = []
+
+    def append_row(label: str, plants: List[str]) -> None:
+        summed = sum_for_plants(plants)
+        row: Dict[str, Any] = {"Plant": label}
+        for col in week_cols:
+            row[col] = float(summed.get(col, 0.0))
+        ordered_rows.append(row)
+
+    if plant_order:
+        for plant in plant_order:
+            append_row(plant, [plant])
+            if include_segment_totals and segment_totals_after and plant in segment_totals_after:
+                total_label, total_plants = segment_totals_after[plant]
+                append_row(total_label, total_plants)
+        append_row("GC Total", list(grouped["Plant"].unique()))
+    else:
+        for plant in sorted(grouped["Plant"].unique()):
+            append_row(plant, [plant])
+        append_row("GC Total", list(grouped["Plant"].unique()))
+
+    result_rows: List[Dict[str, Any]] = []
+    for row in ordered_rows:
+        display_row: Dict[str, Any] = {"Plant": row["Plant"]}
+        for col in week_cols:
+            val = row.get(col, 0.0)
+            display_row[col] = "-" if pd.isna(val) or float(val) == 0.0 else f"{float(val):,.0f}"
+        result_rows.append(display_row)
+
+    columns = [{"name": col, "id": col} for col in ordered_cols]
+    return columns, result_rows
+
+
+def build_production_data_table_by_plant_level_weekly(
+    df: pd.DataFrame,
+    plant_order: Optional[List[str]] = None,
+    include_segment_totals: bool = True,
+    segment_totals_after: Optional[Dict[str, Tuple[str, List[str]]]] = None,
+    max_weeks: int = 13,
+) -> Tuple[List[Dict], List[Dict]]:
+    """Weekly production by plant/level. Only week columns, limited to max_weeks from current week."""
+    base_cols = ["Plant", "Level1", "Level2"]
+    if df.empty:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    working = df.copy()
+    for col in ["Plant", "Level1", "Level2"]:
+        if col not in working.columns:
+            working[col] = ""
+        working[col] = working[col].fillna("").astype(str).str.strip()
+
+    all_week_cols = sorted([c for c in working.columns if re.fullmatch(r"\d{4}-W\d{2}", str(c))])
+
+    # Determine current ISO week and keep only future max_weeks weeks
+    from datetime import date
+    today = date.today()
+    current_iso = today.isocalendar()
+    current_week_label = f"{current_iso.year}-W{current_iso.week:02d}"
+    week_cols = [c for c in all_week_cols if c >= current_week_label][:max_weeks]
+    if not week_cols:
+        week_cols = all_week_cols[-max_weeks:] if all_week_cols else []
+
+    if not week_cols:
+        columns = [{"name": col, "id": col} for col in base_cols]
+        return columns, []
+
+    ordered_cols = ["Plant", "Level1", "Level2", *week_cols]
+
+    for col in week_cols:
+        if col in working.columns:
+            working[col] = pd.to_numeric(working[col], errors="coerce").fillna(0.0)
+        else:
+            working[col] = 0.0
+
+    grouped = (
+        working.groupby(["Plant", "Level1", "Level2"], dropna=False)[week_cols]
+        .sum(min_count=1)
+        .reset_index()
+    )
+
+    if week_cols:
+        grouped = grouped[grouped[week_cols].abs().sum(axis=1) > 0].copy()
+
+    grouped = grouped.sort_values(["Plant", "Level1", "Level2"]).reset_index(drop=True)
+
+    if plant_order:
+        allowed_plants = {str(p).strip() for p in plant_order}
+        grouped = grouped[grouped["Plant"].astype(str).str.strip().isin(allowed_plants)].copy()
+        if grouped.empty:
+            columns = [{"name": col, "id": col} for col in ordered_cols]
+            return columns, []
+
+    result_rows: List[Dict[str, Any]] = []
+
+    def append_plant_detail(plant: str) -> None:
+        subset = grouped[grouped["Plant"].astype(str).str.strip() == plant].copy()
+        if subset.empty:
+            return
+        for _, row in subset.iterrows():
+            record = {"Plant": plant, "Level1": str(row.get("Level1", "")).strip(), "Level2": str(row.get("Level2", "")).strip()}
+            for col in week_cols:
+                record[col] = pd.to_numeric(row.get(col), errors="coerce")
+            result_rows.append(record)
+
+    def ensure_empty_plant_row(plant: str) -> None:
+        exists = any(str(row.get("Plant", "")).strip() == plant for row in result_rows)
+        if exists:
+            return
+        record: Dict[str, Any] = {"Plant": plant, "Level1": "", "Level2": ""}
+        for col in week_cols:
+            record[col] = 0.0
+        result_rows.append(record)
+
+    def append_group_total(label: str, plants: List[str]) -> None:
+        subset = grouped[grouped["Plant"].astype(str).str.strip().isin(plants)].copy()
+        if subset.empty:
+            wk_sum = {col: 0.0 for col in week_cols}
+        else:
+            wk_sum = {col: pd.to_numeric(subset[col], errors="coerce").fillna(0.0).sum(min_count=1) for col in week_cols}
+        result_rows.append({"Plant": label, "Level1": "", "Level2": "", **wk_sum})
+
+    if plant_order:
+        for plant in plant_order:
+            append_plant_detail(plant)
+            ensure_empty_plant_row(plant)
+            if include_segment_totals and segment_totals_after and plant in segment_totals_after:
+                total_label, total_plants = segment_totals_after[plant]
+                append_group_total(total_label, total_plants)
+        append_group_total("GC Total", list(grouped["Plant"].unique()))
+    else:
+        for plant in sorted(grouped["Plant"].unique()):
+            append_plant_detail(plant)
+        append_group_total("GC Total", list(grouped["Plant"].unique()))
+
+    result_df = pd.DataFrame(result_rows)
+    for col in week_cols:
         result_df[col] = result_df[col].apply(lambda v: "-" if pd.isna(v) or float(v) == 0.0 else f"{float(v):,.0f}")
 
     columns = [{"name": col, "id": col} for col in ordered_cols]
@@ -2426,11 +2655,28 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     )
     page_sheets["Production Data"].append(("02 Table2 Plant-Level1-Level2", _snapshot_to_dataframe(p2_columns, p2_rows)))
 
+    production_data_weekly_df = pd.DataFrame(data_bundle.get("production_data_weekly", []))
+    production_data_by_level_weekly_df = pd.DataFrame(data_bundle.get("production_data_by_level_weekly", []))
+    pw3_columns, pw3_rows = build_production_data_table_by_plant_weekly(
+        production_data_weekly_df,
+        plant_order=production_group_1,
+        include_segment_totals=False,
+    )
+    page_sheets["Production Data"].append(("03 Table3 Weekly By Plant", _snapshot_to_dataframe(pw3_columns, pw3_rows)))
+
+    pw4_columns, pw4_rows = build_production_data_table_by_plant_level_weekly(
+        production_data_by_level_weekly_df,
+        plant_order=production_group_1,
+        include_segment_totals=True,
+        segment_totals_after=production_group_1_totals_after,
+    )
+    page_sheets["Production Data"].append(("04 Table4 Weekly Plant-Lv1-Lv2", _snapshot_to_dataframe(pw4_columns, pw4_rows)))
+
     if not td_demand_by_dimension_df.empty:
         dim_columns, dim_rows = build_production_dimension_table(
             td_demand_by_dimension_df, ["Brand", "Size", "Variant"]
         )
-        page_sheets["Production Data"].append(("03 Detail Brand-Size-Variant", _snapshot_to_dataframe(dim_columns, dim_rows)))
+        page_sheets["Production Data"].append(("05 Detail Brand-Size-Variant", _snapshot_to_dataframe(dim_columns, dim_rows)))
 
     page_sheets["Raw Data"].extend(
         [
@@ -3627,6 +3873,21 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         production_version_df = production_version_df[keep].reset_index(drop=True)
     production_version_columns, production_version_rows = build_production_version_comparison_table(production_version_df)
     production_version_styles = build_production_version_style_data_conditional(production_version_columns)
+
+    production_data_weekly_df = pd.DataFrame(data_bundle.get("production_data_weekly", []))
+    production_data_by_level_weekly_df = pd.DataFrame(data_bundle.get("production_data_by_level_weekly", []))
+    weekly_plant_columns, weekly_plant_rows = build_production_data_table_by_plant_weekly(
+        production_data_weekly_df,
+        plant_order=production_group_1,
+        include_segment_totals=False,
+    )
+    weekly_level_columns, weekly_level_rows = build_production_data_table_by_plant_level_weekly(
+        production_data_by_level_weekly_df,
+        plant_order=production_group_1,
+        include_segment_totals=True,
+        segment_totals_after=production_group_1_totals_after,
+    )
+
     td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
     td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
 
@@ -4440,6 +4701,68 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                                 sort_action="native",
                                                 filter_action="none",
                                             ),
+                                            html.H4("Weekly Production Data (By Plant) - Table 3", style={"marginTop": "24px"}),
+                                            DataTable(
+                                                id="production-weekly-plant-table-3",
+                                                columns=weekly_plant_columns,
+                                                data=weekly_plant_rows,
+                                                style_header=PDE_STYLE_HEADER,
+                                                style_cell=PDE_STYLE_CELL,
+                                                style_data_conditional=[
+                                                    *PDE_STYLE_DATA_CONDITIONAL,
+                                                    {
+                                                        "if": {
+                                                            "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                                        },
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#f3f8ff",
+                                                    },
+                                                    {
+                                                        "if": {"filter_query": '{Plant} = "GC Total"'},
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#edf4ff",
+                                                    },
+                                                ],
+                                                style_cell_conditional=[
+                                                    {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                                                ],
+                                                page_action="none",
+                                                style_table={"overflowX": "auto"},
+                                                sort_action="none",
+                                                filter_action="none",
+                                            ),
+                                            html.H4("Weekly Production Data (By Plant / Level1 / Level2) - Table 4", style={"marginTop": "18px"}),
+                                            DataTable(
+                                                id="production-weekly-level-table-4",
+                                                columns=weekly_level_columns,
+                                                data=weekly_level_rows,
+                                                style_header=PDE_STYLE_HEADER,
+                                                style_cell=PDE_STYLE_CELL,
+                                                style_data_conditional=[
+                                                    *PDE_STYLE_DATA_CONDITIONAL,
+                                                    {
+                                                        "if": {
+                                                            "filter_query": '{Plant} = "HP Total" || {Plant} = "TC Total" || {Plant} = "XQ Total"'
+                                                        },
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#f3f8ff",
+                                                    },
+                                                    {
+                                                        "if": {"filter_query": '{Plant} = "GC Total"'},
+                                                        "fontWeight": "700",
+                                                        "backgroundColor": "#edf4ff",
+                                                    },
+                                                ],
+                                                style_cell_conditional=[
+                                                    {"if": {"column_id": "Plant"}, "textAlign": "left"},
+                                                    {"if": {"column_id": "Level1"}, "textAlign": "left"},
+                                                    {"if": {"column_id": "Level2"}, "textAlign": "left"},
+                                                ],
+                                                page_action="none",
+                                                style_table={"overflowX": "auto"},
+                                                sort_action="native",
+                                                filter_action="none",
+                                            ),
                                         ],
                                     ),
                                 ],
@@ -5068,6 +5391,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("production-version-compare-table", "style_data_conditional"),
         Output("production-data-level-table-2", "columns"),
         Output("production-data-level-table-2", "data"),
+        Output("production-weekly-plant-table-3", "columns"),
+        Output("production-weekly-plant-table-3", "data"),
+        Output("production-weekly-level-table-4", "columns"),
+        Output("production-weekly-level-table-4", "data"),
         Input("data-store", "data"),
         Input("role-filter", "value"),
         Input("drill-role-filter", "value"),
@@ -5197,6 +5524,19 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             include_segment_totals=True,
             segment_totals_after=production_group_1_totals_after,
         )
+        production_data_weekly_df = pd.DataFrame(data.get("production_data_weekly", []))
+        production_data_by_level_weekly_df = pd.DataFrame(data.get("production_data_by_level_weekly", []))
+        weekly_plant_columns, weekly_plant_rows = build_production_data_table_by_plant_weekly(
+            production_data_weekly_df,
+            plant_order=production_group_1,
+            include_segment_totals=False,
+        )
+        weekly_level_columns, weekly_level_rows = build_production_data_table_by_plant_level_weekly(
+            production_data_by_level_weekly_df,
+            plant_order=production_group_1,
+            include_segment_totals=True,
+            segment_totals_after=production_group_1_totals_after,
+        )
         level1_core_columns, level1_core_rows = build_first_level_summary(
             monthly_level1,
             source_level_column="First Level",
@@ -5252,6 +5592,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             production_version_styles,
             production_level_columns_1,
             production_level_rows_1,
+            weekly_plant_columns,
+            weekly_plant_rows,
+            weekly_level_columns,
+            weekly_level_rows,
         )
 
     @app.callback(
