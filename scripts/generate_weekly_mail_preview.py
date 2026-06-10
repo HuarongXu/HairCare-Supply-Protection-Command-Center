@@ -33,7 +33,8 @@ from dashboards.matres_app import (
 # ---------------------------------------------------------------------------
 # Dashboard URL (used in the email body link)
 # ---------------------------------------------------------------------------
-DASHBOARD_URL = "http://143.35.13.175:8050/"
+import os as _os
+DASHBOARD_URL = _os.getenv("MATRES_DASHBOARD_URL", "http://127.0.0.1:8050/")
 LOCAL_DASHBOARD_URL = "http://127.0.0.1:8050/"
 
 # ---------------------------------------------------------------------------

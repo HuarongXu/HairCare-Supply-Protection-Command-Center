@@ -17,7 +17,11 @@ REM   After that, use C:\MatRes\server_start.bat to start daily.
 REM ================================================================
 
 set "DEPLOY_DIR=C:\MatRes"
-set "REPO_URL=https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git"
+if defined MATRES_REPO_URL (
+  set "REPO_URL=%MATRES_REPO_URL%"
+) else (
+  set /p "REPO_URL=Enter Git repository URL: "
+)
 set "BRANCH=main"
 
 echo ============================================
@@ -100,7 +104,7 @@ if exist "%DEPLOY_DIR%\.git" (
   echo [INFO] Repository exists, pulling latest...
   pushd "%DEPLOY_DIR%"
   git fetch origin --prune
-  git reset --hard origin/%BRANCH%
+  git pull origin %BRANCH%
   popd
 ) else (
   if exist "%DEPLOY_DIR%" (
@@ -143,7 +147,6 @@ set "ESCAPED_DATA=!ONEDRIVE_DATA:\=\\!"
   echo   "processed_dir": "data/processed",
   echo   "requester_roles_path": "config/requester_roles.json",
   echo   "time_zone": "Asia/Shanghai",
-  echo   "admin_password": "HR",
   echo   "refresh": {
   echo     "append_history": true,
   echo     "history_keys": ["Material Number", "Reservation No", "Availability Date"]
@@ -200,7 +203,7 @@ REM --- server_start.bat ---
   echo.
   echo echo [INFO] Pulling latest code...
   echo git fetch origin --prune
-  echo git reset --hard origin/%BRANCH%
+  echo git pull origin %BRANCH%
   echo for /f "delims=" %%%%C in ^('git log -1 --oneline'^) do set "COMMIT=%%%%C"
   echo echo [OK] Commit: ^^!COMMIT^^!
   echo.
@@ -238,16 +241,16 @@ REM --- server_auto_update.vbs (silent background updater) ---
   echo sRemote = Trim^(oExec.StdOut.ReadLine^(^)^)
   echo.
   echo If sLocal ^<^> sRemote Then
-  echo   ' New code available — write flag and let dashboard handle restart
-  echo   oShell.Run "git reset --hard origin/main", 0, True
+  echo   ' New code available - update via merge (safer than reset --hard)
+  echo   oShell.Run "git pull origin main", 0, True
   echo   Set oFS = CreateObject^("Scripting.FileSystemObject"^)
   echo   Set oFile = oFS.CreateTextFile^(sDir ^& "\data\processed\.run_pipeline_on_start", True^)
   echo   oFile.Write "auto-update"
   echo   oFile.Close
-  echo   ' Kill existing dashboard and restart
-  echo   oShell.Run "taskkill /F /IM python.exe", 0, True
-  echo   WScript.Sleep 2000
-  echo   oShell.Run "cmd /c """ ^& sDir ^& "\server_start.bat""", 1, False
+  echo   ' Signal the dashboard to restart gracefully
+  echo   Set oFile = oFS.CreateTextFile^(sDir ^& "\data\processed\.restart_requested", True^)
+  echo   oFile.Write "auto-update"
+  echo   oFile.Close
   echo End If
 ) > "%DEPLOY_DIR%\server_auto_update.vbs"
 

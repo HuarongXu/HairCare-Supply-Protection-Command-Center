@@ -3,6 +3,10 @@ setlocal enabledelayedexpansion
 chcp 65001 >nul
 title MatRes One-Click Update + Start
 
+REM ========== Machine-specific config (4CV823WZKZ-W10) ==========
+set "MATRES_DASHBOARD_URL=http://143.35.13.175:8050/"
+set "MATRES_ADMIN_PASSWORD=HR"
+
 REM ========== 0) 项目目录 ==========
 set "PROJECT_ROOT=%~dp0"
 pushd "%PROJECT_ROOT%"
@@ -25,15 +29,18 @@ if not exist ".git" (
 )
 
 REM ========== 3) 绑定远程 ==========
+REM Repository URL — change here if the repo moves
+set "EXPECTED_REPO=https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git"
+
 git remote get-url origin >nul 2>nul
 if errorlevel 1 (
   echo [INFO] 添加远程 origin...
-  git remote add origin https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git
+  git remote add origin !EXPECTED_REPO!
 ) else (
   for /f "delims=" %%R in ('git remote get-url origin') do set "REMOTE_URL=%%R"
-  if /I not "!REMOTE_URL!"=="https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git" (
+  if /I not "!REMOTE_URL!"=="!EXPECTED_REPO!" (
     echo [WARN] origin 地址不是目标仓库，正在修正...
-    git remote set-url origin https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git
+    git remote set-url origin !EXPECTED_REPO!
   )
 )
 
@@ -60,7 +67,7 @@ if errorlevel 1 (
   )
 )
 
-git reset --hard origin/main
+git pull origin main
 if errorlevel 1 (
   echo [ERROR] git reset 失败。
   pause

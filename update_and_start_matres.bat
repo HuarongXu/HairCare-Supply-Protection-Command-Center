@@ -3,6 +3,9 @@ setlocal enabledelayedexpansion
 chcp 65001 >nul
 title MatRes One-Click Update + Start
 
+REM ========== Machine-specific config ==========
+if not defined MATRES_ADMIN_PASSWORD set "MATRES_ADMIN_PASSWORD=HR"
+
 echo ========================================
 echo   MatRes Dashboard - One Click Start
 echo ========================================
@@ -42,9 +45,12 @@ if errorlevel 1 (
 )
 
 REM -- Setup remote --
+REM Repository URL - change here if the repo moves
+set "EXPECTED_REPO=https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git"
+
 git remote get-url origin >nul 2>nul
 if errorlevel 1 (
-  git remote add origin https://github.com/HuarongXu/HairCare-Supply-Protection-Command-Center.git
+  git remote add origin !EXPECTED_REPO!
 )
 
 REM -- Pull latest code --
@@ -68,7 +74,7 @@ if errorlevel 1 (
   git checkout -B main origin/main >nul 2>nul
 )
 
-git reset --hard origin/main >nul 2>nul
+git pull origin main >nul 2>nul
 for /f "delims=" %%C in ('git log -1 --oneline 2^>nul') do echo [OK] Commit: %%C
 echo.
 

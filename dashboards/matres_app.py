@@ -17,7 +17,7 @@ import dash
 from dash import Dash, Input, Output, State, dcc, html
 from dash.dash_table import DataTable
 from dash.exceptions import PreventUpdate
-from flask import Response, abort, request
+from flask import Response, abort, request, session as flask_session
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -69,7 +69,7 @@ def _write_data_version() -> str:
 class AppConfig:
     processed_dir: Path
     data_base_dir: Path
-    admin_password: str = "HR"
+    admin_password: str = ""
 
     @staticmethod
     def load(path: Path) -> "AppConfig":
@@ -82,7 +82,15 @@ class AppConfig:
         if not data_base_dir.is_absolute():
             data_base_dir = (path.parent.parent / data_base_dir).resolve()
 
-        admin_password = raw.get("admin_password", "HR")
+        # Priority: env var > config.json (never fall back to a hardcoded default)
+        admin_password = os.getenv("MATRES_ADMIN_PASSWORD", "").strip()
+        if not admin_password:
+            admin_password = raw.get("admin_password", "")
+        if not admin_password:
+            logging.warning(
+                "No admin password configured. Set MATRES_ADMIN_PASSWORD env var "
+                "or admin_password in config.json."
+            )
 
         return AppConfig(processed_dir=processed_dir, data_base_dir=data_base_dir, admin_password=admin_password)
 
@@ -285,13 +293,38 @@ def load_data_bundle_partial(
 # Pipeline subprocess helpers
 # ---------------------------------------------------------------------------
 
-def _start_pipeline_subprocess(group: str) -> None:
+# Cooldown: minimum seconds between two pipeline triggers
+_PIPELINE_COOLDOWN_SECONDS = 60
+_last_pipeline_trigger: float = 0.0
+
+
+def _start_pipeline_subprocess(group: str) -> str:
     """Launch matres_pipeline.py in a detached subprocess.
 
     *group* is one of the REFRESH_GROUPS keys (``all``, ``demand``, etc.).
     Progress is written to ``_PIPELINE_PROGRESS_FILE`` by the pipeline.
     Output is redirected to ``pipeline_output.log`` for debugging.
+
+    Returns empty string on success, or an error message string if blocked.
     """
+    global _last_pipeline_trigger
+
+    # --- Guard 1: validate group against allow-list ---
+    if group not in REFRESH_GROUPS:
+        logging.warning("Blocked pipeline trigger with invalid group: %s", group)
+        return f"Invalid refresh scope: {group}"
+
+    # --- Guard 2: cooldown ---
+    import time as _time
+    now = _time.time()
+    elapsed = now - _last_pipeline_trigger
+    if elapsed < _PIPELINE_COOLDOWN_SECONDS:
+        remaining = int(_PIPELINE_COOLDOWN_SECONDS - elapsed)
+        logging.info("Pipeline trigger blocked by cooldown (%ds remaining).", remaining)
+        return f"Please wait {remaining}s before triggering again."
+
+    _last_pipeline_trigger = now
+
     cmd = [sys.executable, str(_PIPELINE_SCRIPT), "--progress-file", str(_PIPELINE_PROGRESS_FILE)]
     if group and group != "all":
         cmd += ["--stages", group]
@@ -304,6 +337,7 @@ def _start_pipeline_subprocess(group: str) -> None:
         stdout=log_fh,
         stderr=log_fh,
     )
+    return ""
 
 
 def _read_pipeline_progress() -> Optional[Dict[str, Any]]:
@@ -5215,7 +5249,16 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         # ── 1) Manual click → launch pipeline subprocess ──
         if trigger == "manual-refresh-btn":
             group = scope or "all"
-            _start_pipeline_subprocess(group)
+            err = _start_pipeline_subprocess(group)
+            if err:
+                # Blocked by cooldown or invalid group
+                return (
+                    dash.no_update, dash.no_update,
+                    f"⚠️ {err}",
+                    True, _HIDE,
+                    dash.no_update, dash.no_update, dash.no_update,
+                    False,
+                )
             label = REFRESH_GROUPS.get(group, {}).get("label", group)
             ts = datetime.now().strftime("%H:%M:%S")
             return (
@@ -6053,10 +6096,43 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             return dash.no_update, f"Backup failed: {exc}"
 
 
+# ---------------------------------------------------------------------------
+# Server-side admin auth helpers
+# ---------------------------------------------------------------------------
+_LOGIN_FAIL_WINDOW = 300       # 5-minute window
+_LOGIN_FAIL_MAX = 5            # max failures per IP in window
+_login_failures: Dict[str, List[float]] = {}   # ip -> [timestamps]
+
+
+def _is_admin_authenticated() -> bool:
+    """Check if the current request has a valid server-side admin session."""
+    return bool(flask_session.get("admin_authenticated"))
+
+
+def _record_login_failure(ip: str) -> None:
+    """Record a failed login attempt for rate limiting."""
+    import time as _time
+    now = _time.time()
+    if ip not in _login_failures:
+        _login_failures[ip] = []
+    # Prune old entries
+    _login_failures[ip] = [t for t in _login_failures[ip] if now - t < _LOGIN_FAIL_WINDOW]
+    _login_failures[ip].append(now)
+
+
+def _is_login_blocked(ip: str) -> bool:
+    """Check if an IP has exceeded the login failure limit."""
+    import time as _time
+    now = _time.time()
+    attempts = _login_failures.get(ip, [])
+    recent = [t for t in attempts if now - t < _LOGIN_FAIL_WINDOW]
+    return len(recent) >= _LOGIN_FAIL_MAX
+
+
 def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     """Register all callbacks for the /admin page."""
 
-    # ── Login ──────────────────────────────────────────────────────
+    # ── Login (server-side session + rate limiting) ─────────────
     @app.callback(
         Output("admin-session", "data"),
         Output("admin-login-error", "children"),
@@ -6069,15 +6145,37 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
         prevent_initial_call=True,
     )
     def admin_login(n_clicks, n_submit, password, session):
-        if session and session.get("authenticated"):
-            return dash.no_update, dash.no_update, {"display": "none"}, {"display": "block"}
+        # Already authenticated (server-side check)
+        if _is_admin_authenticated():
+            return {"authenticated": True}, dash.no_update, {"display": "none"}, {"display": "block"}
+
+        client_ip = str(request.remote_addr or "unknown")
+
+        # Rate limiting: block after too many failures
+        if _is_login_blocked(client_ip):
+            logging.warning("Login blocked for IP %s (too many failures).", client_ip)
+            return dash.no_update, "Too many failed attempts. Please wait 5 minutes.", dash.no_update, dash.no_update
+
         if not password:
             return dash.no_update, "Please enter a password.", dash.no_update, dash.no_update
+
+        if not cfg.admin_password:
+            logging.error("Admin login attempted but no password is configured.")
+            return dash.no_update, "Admin password not configured. Contact the administrator.", dash.no_update, dash.no_update
+
         if password == cfg.admin_password:
+            # Set server-side session
+            flask_session["admin_authenticated"] = True
+            flask_session.permanent = True
+            logging.info("Admin login successful from IP %s.", client_ip)
             return {"authenticated": True}, "", {"display": "none"}, {"display": "block"}
+
+        # Failed login
+        _record_login_failure(client_ip)
+        logging.warning("Admin login failed from IP %s.", client_ip)
         return dash.no_update, "Incorrect password.", dash.no_update, dash.no_update
 
-    # ── Restore session on page load ──
+    # ── Restore session on page load (check server-side) ──
     @app.callback(
         Output("admin-login-box", "style", allow_duplicate=True),
         Output("admin-panel", "style", allow_duplicate=True),
@@ -6085,7 +6183,8 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
         prevent_initial_call=True,
     )
     def admin_restore_session(session):
-        if session and session.get("authenticated"):
+        # Server-side session is the source of truth
+        if _is_admin_authenticated():
             return {"display": "none"}, {"display": "block"}
         return dash.no_update, dash.no_update
 
@@ -6102,8 +6201,17 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     def admin_run_pipeline(n_clicks, scope):
         if not n_clicks:
             raise PreventUpdate
+        if not _is_admin_authenticated():
+            raise PreventUpdate
         group = scope or "all"
-        _start_pipeline_subprocess(group)
+        err = _start_pipeline_subprocess(group)
+        if err:
+            return (
+                f"⚠️ {err}",
+                True,    # keep interval disabled
+                {"marginTop": "10px", "display": "block"},
+                False,   # re-enable button
+            )
         label = REFRESH_GROUPS.get(group, {}).get("label", group)
         ts = datetime.now().strftime("%H:%M:%S")
         return (
@@ -6188,6 +6296,8 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     def admin_refresh_data(n_clicks):
         if not n_clicks:
             raise PreventUpdate
+        if not _is_admin_authenticated():
+            raise PreventUpdate
         try:
             bundle = load_data_bundle(cfg)
             # Write data version so ALL connected dashboards detect and refresh
@@ -6210,6 +6320,8 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     def admin_backup(n_clicks):
         if not n_clicks:
             raise PreventUpdate
+        if not _is_admin_authenticated():
+            raise PreventUpdate
         try:
             snapshot_dir, excel_file, exported_count = create_dashboard_snapshot(cfg)
             logging.info("Backup snapshot saved: %s (%d tables)", snapshot_dir, exported_count)
@@ -6227,6 +6339,8 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     )
     def admin_update_restart(n_clicks):
         if not n_clicks:
+            raise PreventUpdate
+        if not _is_admin_authenticated():
             raise PreventUpdate
 
         messages: List[str] = []
@@ -6281,6 +6395,8 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     )
     def admin_masterdata_scan(n_clicks):
         if not n_clicks:
+            raise PreventUpdate
+        if not _is_admin_authenticated():
             raise PreventUpdate
         try:
             # Import pipeline functions to build the report
@@ -6362,6 +6478,8 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     def admin_masterdata_export(n_clicks, store_data):
         if not n_clicks or not store_data:
             raise PreventUpdate
+        if not _is_admin_authenticated():
+            raise PreventUpdate
         try:
             report_df = pd.DataFrame(store_data)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -6384,6 +6502,8 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
     )
     def admin_datasource_scan(n_clicks):
         if not n_clicks:
+            raise PreventUpdate
+        if not _is_admin_authenticated():
             raise PreventUpdate
         try:
             sys.path.insert(0, str(_PROJECT_ROOT / "scripts"))
@@ -6467,6 +6587,23 @@ def create_app() -> Dash:
         url_base_pathname="/",
     )
 
+    # ── Server-side session: set SECRET_KEY ──
+    import secrets as _secrets
+    app.server.secret_key = os.getenv(
+        "MATRES_SECRET_KEY",
+        _secrets.token_hex(32),  # random per restart if env var not set
+    )
+    logging.info("Flask SECRET_KEY configured (server-side sessions enabled).")
+
+    # ── Security response headers ──
+    @app.server.after_request
+    def add_security_headers(response):
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        return response
+
     @app.server.route("/docs/user-guide", methods=["GET"])
     def serve_user_guide() -> Response:
         guide_path = _PROJECT_ROOT / "docs" / "user_guide.html"
@@ -6484,10 +6621,19 @@ def create_app() -> Dash:
             logging.exception("Failed to regenerate/open weekly mail preview")
             return Response("Failed to refresh weekly mail preview. Please check server logs.", status=500)
 
+    # ── IP-based access control ──────────────────────────────────
+    # Default: allow common internal/private subnets when env var is not set.
+    # Set MATRES_ALLOWED_SUBNETS to override (comma-separated CIDRs).
+    # Set MATRES_ALLOWED_SUBNETS=disabled  to turn off IP filtering entirely.
+    _DEFAULT_INTERNAL_SUBNETS = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8"
     raw_allowed_subnets = os.getenv("MATRES_ALLOWED_SUBNETS", "").strip()
-    if raw_allowed_subnets:
+
+    if raw_allowed_subnets.lower() == "disabled":
+        logging.info("IP access guard explicitly disabled via MATRES_ALLOWED_SUBNETS=disabled.")
+    else:
+        subnet_source = raw_allowed_subnets if raw_allowed_subnets else _DEFAULT_INTERNAL_SUBNETS
         allowed_subnets = []
-        for subnet_text in [part.strip() for part in raw_allowed_subnets.split(",") if part.strip()]:
+        for subnet_text in [part.strip() for part in subnet_source.split(",") if part.strip()]:
             try:
                 allowed_subnets.append(ipaddress.ip_network(subnet_text, strict=False))
             except ValueError:
@@ -6496,8 +6642,8 @@ def create_app() -> Dash:
         if allowed_subnets:
             @app.server.before_request
             def enforce_internal_access() -> None:
-                forwarded_for = str(request.headers.get("X-Forwarded-For", "")).strip()
-                source_ip = forwarded_for.split(",")[0].strip() if forwarded_for else str(request.remote_addr or "").strip()
+                # Use remote_addr directly (safe without reverse proxy)
+                source_ip = str(request.remote_addr or "").strip()
                 try:
                     source_addr = ipaddress.ip_address(source_ip)
                 except ValueError:
@@ -6507,7 +6653,10 @@ def create_app() -> Dash:
                 if not any(source_addr in subnet for subnet in allowed_subnets):
                     abort(403)
 
-            logging.info("Internal access guard enabled with %d subnet(s).", len(allowed_subnets))
+            if raw_allowed_subnets:
+                logging.info("IP access guard enabled with custom subnets: %s", raw_allowed_subnets)
+            else:
+                logging.info("IP access guard enabled with default internal subnets (%s).", _DEFAULT_INTERNAL_SUBNETS)
         else:
             logging.warning("MATRES_ALLOWED_SUBNETS was set but no valid subnet was parsed.")
 
