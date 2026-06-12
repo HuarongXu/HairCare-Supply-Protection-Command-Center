@@ -211,7 +211,7 @@ REFRESH_GROUPS: Dict[str, Dict[str, str]] = {
     },
     "td": {
         "label": "TD Validation",
-        "description": "td_validation + td_validation_detail",
+        "description": "td_validation",
     },
     "production": {
         "label": "Production Data",
@@ -228,7 +228,7 @@ _REFRESH_GROUP_KEYS: Dict[str, List[str]] = {
         "monthly_level1",
         "pde_alerts",
     ],
-    "td": ["td_validation", "td_validation_detail"],
+    "td": ["td_validation"],
     "production": ["production_data", "production_data_by_level", "production_data_weekly", "production_data_by_level_weekly", "td_demand_by_dimension", "production_version_compare"],
 }
 
@@ -247,7 +247,6 @@ def _load_single_key(cfg: AppConfig, key: str) -> Any:
         "td_demand_by_dimension": lambda: load_dataset(cfg.processed_dir, "td_demand_by_dimension.csv"),
         "production_version_compare": lambda: load_dataset(cfg.processed_dir, "production_version_comparison.csv"),
         "td_validation": lambda: load_dataset(cfg.processed_dir, "td_version_monthly_comparison.csv"),
-        "td_validation_detail": lambda: load_dataset(cfg.processed_dir, "td_version_gap_details.csv"),
         "historical_shipment": lambda: load_historical_shipment_dataset(cfg),
         "pde_alerts": lambda: load_dataset(cfg.processed_dir, "pde_alerts.csv"),
     }
@@ -2598,7 +2597,7 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     production_data_df = pd.DataFrame(data_bundle.get("production_data", []))
     production_data_by_level_df = pd.DataFrame(data_bundle.get("production_data_by_level", []))
     td_demand_by_dimension_df = pd.DataFrame(data_bundle.get("td_demand_by_dimension", []))
-    td_validation_detail = pd.DataFrame(data_bundle.get("td_validation_detail", []))
+    td_validation_detail = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
     historical_shipment = pd.DataFrame(data_bundle.get("historical_shipment", []))
     pde_alerts = pd.DataFrame(data_bundle.get("pde_alerts", []))
     request_details = load_request_details(cfg)
@@ -3849,7 +3848,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     hc_idp_monthly = pd.DataFrame(data_bundle.get("hc_idp_monthly", []))
     production_data_df = pd.DataFrame(data_bundle.get("production_data", []))
     production_data_by_level_df = pd.DataFrame(data_bundle.get("production_data_by_level", []))
-    td_validation_detail = pd.DataFrame(data_bundle.get("td_validation_detail", []))
+    td_validation_detail = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
     historical_shipment = pd.DataFrame(data_bundle.get("historical_shipment", []))
     pde_alerts = pd.DataFrame(data_bundle["pde_alerts"])
     request_details = load_request_details(cfg)
@@ -5460,7 +5459,7 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         hc_idp_monthly = pd.DataFrame(data.get("hc_idp_monthly", []))
         production_data_df = pd.DataFrame(data.get("production_data", []))
         production_data_by_level_df = pd.DataFrame(data.get("production_data_by_level", []))
-        td_validation_detail = pd.DataFrame(data.get("td_validation_detail", []))
+        td_validation_detail = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
         historical_shipment = pd.DataFrame(data.get("historical_shipment", []))
         pde_alerts = pd.DataFrame(data.get("pde_alerts", []))
         request_details = load_request_details(cfg)
@@ -5773,10 +5772,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Input("td-validation-table", "derived_viewport_data"),
         Input("td-gap-level2-table", "active_cell"),
         Input("td-gap-level2-table", "derived_viewport_data"),
-        Input("data-store", "data"),
     )
-    def update_td_gap_details(active_cell, table_rows, level2_active_cell, level2_rows, data_store):
-        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+    def update_td_gap_details(active_cell, table_rows, level2_active_cell, level2_rows):
+        td_detail_df = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
         title, columns, data, style_conditional = build_td_gap_detail_table(
             active_cell,
             table_rows or [],
@@ -5793,10 +5791,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("td-gap-level2-table", "style_data_conditional"),
         Input("td-validation-table", "active_cell"),
         Input("td-validation-table", "derived_viewport_data"),
-        Input("data-store", "data"),
     )
-    def update_td_gap_level2_details(active_cell, table_rows, data_store):
-        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+    def update_td_gap_level2_details(active_cell, table_rows):
+        td_detail_df = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
         title, columns, data, style_conditional = build_td_gap_level2_table(active_cell, table_rows or [], td_detail_df)
         return title, columns, data, style_conditional
 
@@ -5879,10 +5876,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Output("td-gap-brand-summary-table", "style_data_conditional"),
         Input("td-validation-table", "active_cell"),
         Input("td-validation-table", "derived_viewport_data"),
-        Input("data-store", "data"),
     )
-    def update_td_gap_brand_summary(active_cell, table_rows, data_store):
-        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+    def update_td_gap_brand_summary(active_cell, table_rows):
+        td_detail_df = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
         title, columns, data, style_conditional = build_td_gap_brand_summary_table(
             active_cell, table_rows or [], td_detail_df,
         )
@@ -5898,10 +5894,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         Input("td-gap-brand-summary-table", "active_cell"),
         Input("td-gap-brand-summary-table", "derived_viewport_data"),
         Input("brand-dim-checklist", "value"),
-        Input("data-store", "data"),
     )
-    def update_td_gap_brand_detail(active_cell, table_rows, brand_active_cell, brand_rows, visible_dims, data_store):
-        td_detail_df = pd.DataFrame((data_store or {}).get("td_validation_detail", []))
+    def update_td_gap_brand_detail(active_cell, table_rows, brand_active_cell, brand_rows, visible_dims):
+        td_detail_df = load_dataset(cfg.processed_dir, "td_version_gap_details.csv")
         title, columns, data, style_conditional = build_td_gap_brand_detail_table(
             active_cell, table_rows or [],
             brand_active_cell, brand_rows or [],
