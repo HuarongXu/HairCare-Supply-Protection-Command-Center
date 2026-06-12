@@ -471,8 +471,10 @@ def read_second_level_mapping(cfg: PipelineConfig) -> pd.DataFrame:
 
 
 def read_xqtc_9su_mapping(root: Path) -> pd.DataFrame:
+    # Parameter file lives in 0.Data Base (parent of Production Volume)
+    search_dir = root.parent if root.parent != root else root
     candidates = [
-        p for p in root.glob("Parameter*.xls*")
+        p for p in search_dir.glob("Parameter*.xls*")
         if p.is_file() and not p.name.startswith("~$")
     ]
     if not candidates:
