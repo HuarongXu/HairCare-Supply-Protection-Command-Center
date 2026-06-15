@@ -6620,7 +6620,7 @@ def create_app() -> Dash:
     # Default: allow common internal/private subnets when env var is not set.
     # Set MATRES_ALLOWED_SUBNETS to override (comma-separated CIDRs).
     # Set MATRES_ALLOWED_SUBNETS=disabled  to turn off IP filtering entirely.
-    _DEFAULT_INTERNAL_SUBNETS = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,143.0.0.0/8"
+    _DEFAULT_INTERNAL_SUBNETS = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,143.0.0.0/8,155.0.0.0/8"
     raw_allowed_subnets = os.getenv("MATRES_ALLOWED_SUBNETS", "").strip()
 
     if raw_allowed_subnets.lower() == "disabled":
@@ -6642,10 +6642,12 @@ def create_app() -> Dash:
                 try:
                     source_addr = ipaddress.ip_address(source_ip)
                 except ValueError:
+                    logging.warning("IP access blocked: invalid IP format %r", source_ip)
                     abort(403)
                     return
 
                 if not any(source_addr in subnet for subnet in allowed_subnets):
+                    logging.warning("IP access blocked: %s is not in allowed subnets", source_ip)
                     abort(403)
 
             if raw_allowed_subnets:
