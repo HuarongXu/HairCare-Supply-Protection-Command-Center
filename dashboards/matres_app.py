@@ -6620,7 +6620,7 @@ def create_app() -> Dash:
     # Default: allow common internal/private subnets when env var is not set.
     # Set MATRES_ALLOWED_SUBNETS to override (comma-separated CIDRs).
     # Set MATRES_ALLOWED_SUBNETS=disabled  to turn off IP filtering entirely.
-    _DEFAULT_INTERNAL_SUBNETS = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8"
+    _DEFAULT_INTERNAL_SUBNETS = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,143.0.0.0/8"
     raw_allowed_subnets = os.getenv("MATRES_ALLOWED_SUBNETS", "").strip()
 
     if raw_allowed_subnets.lower() == "disabled":
