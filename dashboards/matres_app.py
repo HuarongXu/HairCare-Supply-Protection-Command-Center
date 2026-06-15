@@ -6617,27 +6617,22 @@ def create_app() -> Dash:
             return Response("Failed to refresh weekly mail preview. Please check server logs.", status=500)
 
     # ── IP-based access control ──────────────────────────────────
-    # Default: allow common internal/private subnets when env var is not set.
-    # Set MATRES_ALLOWED_SUBNETS to override (comma-separated CIDRs).
-    # Set MATRES_ALLOWED_SUBNETS=disabled  to turn off IP filtering entirely.
-    _DEFAULT_INTERNAL_SUBNETS = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,143.0.0.0/8,155.0.0.0/8"
+    # Disabled: server runs on P&G corporate LAN (143.x.x.x) which is
+    # not routable from external networks, so network-layer isolation is
+    # sufficient.  The /admin page remains password-protected.
+    # To re-enable, set env var MATRES_ALLOWED_SUBNETS to comma-separated
+    # CIDRs (e.g. "10.0.0.0/8,143.0.0.0/8,155.0.0.0/8").
     raw_allowed_subnets = os.getenv("MATRES_ALLOWED_SUBNETS", "").strip()
-
-    if raw_allowed_subnets.lower() == "disabled":
-        logging.info("IP access guard explicitly disabled via MATRES_ALLOWED_SUBNETS=disabled.")
-    else:
-        subnet_source = raw_allowed_subnets if raw_allowed_subnets else _DEFAULT_INTERNAL_SUBNETS
+    if raw_allowed_subnets and raw_allowed_subnets.lower() != "disabled":
         allowed_subnets = []
-        for subnet_text in [part.strip() for part in subnet_source.split(",") if part.strip()]:
+        for subnet_text in [p.strip() for p in raw_allowed_subnets.split(",") if p.strip()]:
             try:
                 allowed_subnets.append(ipaddress.ip_network(subnet_text, strict=False))
             except ValueError:
                 logging.warning("Invalid subnet ignored in MATRES_ALLOWED_SUBNETS: %s", subnet_text)
-
         if allowed_subnets:
             @app.server.before_request
             def enforce_internal_access() -> None:
-                # Use remote_addr directly (safe without reverse proxy)
                 source_ip = str(request.remote_addr or "").strip()
                 try:
                     source_addr = ipaddress.ip_address(source_ip)
@@ -6645,17 +6640,12 @@ def create_app() -> Dash:
                     logging.warning("IP access blocked: invalid IP format %r", source_ip)
                     abort(403)
                     return
-
                 if not any(source_addr in subnet for subnet in allowed_subnets):
                     logging.warning("IP access blocked: %s is not in allowed subnets", source_ip)
                     abort(403)
-
-            if raw_allowed_subnets:
-                logging.info("IP access guard enabled with custom subnets: %s", raw_allowed_subnets)
-            else:
-                logging.info("IP access guard enabled with default internal subnets (%s).", _DEFAULT_INTERNAL_SUBNETS)
-        else:
-            logging.warning("MATRES_ALLOWED_SUBNETS was set but no valid subnet was parsed.")
+            logging.info("IP access guard enabled with subnets: %s", raw_allowed_subnets)
+    else:
+        logging.info("IP access guard disabled (relying on network-layer isolation).")
 
     # ── Pre-build both page layouts ──
     dashboard_layout = build_layout(app, cfg)
