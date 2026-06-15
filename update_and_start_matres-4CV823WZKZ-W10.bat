@@ -194,7 +194,6 @@ echo ========================================
 echo.
 
 REM ========== 8) 启动看板（生产模式 Waitress）==========
-set "MATRES_ALLOWED_SUBNETS=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,143.35.13.175/32"
 python -m waitress --listen=0.0.0.0:8050 dashboards.matres_app:app.server
 
 popd
