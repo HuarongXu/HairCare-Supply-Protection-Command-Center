@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -356,6 +356,79 @@ def _read_pipeline_progress() -> Optional[Dict[str, Any]]:
     except (json.JSONDecodeError, OSError):
         pass
     return None
+
+
+# ---------------------------------------------------------------------------
+# Daily auto-refresh scheduler
+# ---------------------------------------------------------------------------
+
+# Local time the daily pipeline refresh runs (24h clock).
+_DAILY_REFRESH_HOUR = 9
+_DAILY_REFRESH_MINUTE = 0
+_daily_scheduler_started = False
+
+
+def _run_pipeline_and_notify() -> None:
+    """Trigger the full pipeline and notify browsers once it completes."""
+    err = _start_pipeline_subprocess("all")
+    if err:
+        logging.warning("Scheduled daily refresh skipped: %s", err)
+        return
+    logging.info("Scheduled daily refresh started.")
+    import time as _time
+
+    for _ in range(1800):  # wait up to ~30 minutes for completion
+        _time.sleep(1)
+        progress = _read_pipeline_progress()
+        if progress and progress.get("status") in ("completed", "error"):
+            if progress["status"] == "completed":
+                logging.info("Scheduled daily refresh completed. Writing data version.")
+                _write_data_version()
+            else:
+                logging.warning(
+                    "Scheduled daily refresh finished with error: %s",
+                    progress.get("error_message"),
+                )
+            return
+    logging.warning("Scheduled daily refresh monitor timed out after 1800s.")
+
+
+def _start_daily_scheduler() -> None:
+    """Start a background thread that runs the pipeline once per day at the
+    configured local time (default 09:00)."""
+    global _daily_scheduler_started
+    if _daily_scheduler_started:
+        return
+    _daily_scheduler_started = True
+
+    import threading as _threading
+    import time as _time
+
+    def _loop():
+        while True:
+            now = datetime.now()
+            target = now.replace(
+                hour=_DAILY_REFRESH_HOUR,
+                minute=_DAILY_REFRESH_MINUTE,
+                second=0,
+                microsecond=0,
+            )
+            if target <= now:
+                target += timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            logging.info(
+                "Daily auto-refresh scheduled for %s (in %.0f min).",
+                target.strftime("%Y-%m-%d %H:%M"),
+                wait_seconds / 60,
+            )
+            _time.sleep(wait_seconds)
+            try:
+                _run_pipeline_and_notify()
+            except Exception:
+                logging.exception("Scheduled daily refresh failed unexpectedly.")
+
+    _threading.Thread(target=_loop, daemon=True, name="daily-refresh").start()
+
 
 
 REQUEST_DETAILS_CACHE: Dict[str, Any] = {"mtime": None, "data": pd.DataFrame()}
@@ -6708,6 +6781,9 @@ def create_app() -> Dash:
             _threading.Thread(target=_wait_and_notify, daemon=True).start()
         except Exception:
             logging.exception("Failed to auto-run pipeline on start")
+
+    # ── Start daily auto-refresh scheduler (default 09:00 local) ──
+    _start_daily_scheduler()
 
     return app
 
