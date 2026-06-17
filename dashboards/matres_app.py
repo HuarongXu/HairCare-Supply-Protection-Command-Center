@@ -324,6 +324,15 @@ def _start_pipeline_subprocess(group: str) -> str:
 
     _last_pipeline_trigger = now
 
+    # Clear any stale progress file from a previous run so the first poll does
+    # not read an old "completed" state before this subprocess writes its own
+    # "running" status (otherwise the progress bar jumps to 100% instantly and
+    # the first trigger appears to fail).
+    try:
+        _PIPELINE_PROGRESS_FILE.unlink(missing_ok=True)
+    except OSError:
+        logging.warning("Could not remove stale progress file: %s", _PIPELINE_PROGRESS_FILE)
+
     cmd = [sys.executable, str(_PIPELINE_SCRIPT), "--progress-file", str(_PIPELINE_PROGRESS_FILE)]
     if group and group != "all":
         cmd += ["--stages", group]
