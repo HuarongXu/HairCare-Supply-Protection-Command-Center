@@ -98,8 +98,11 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 - 尝试 `http://localhost:8050` 并在代理中放行 localhost/127.0.0.1
 
 ## 9）建议运维方式
-- 用 Windows 任务计划定时跑 `scripts/matres_pipeline.py`
-- Dashboard 在 VM 常驻（任务计划或 NSSM）
+- **看板已内置每日自动刷新**：后台调度线程每天 **上午 9:00（VM 本地时间）** 自动运行一次全量 Pipeline，并通知所有已打开的浏览器自动刷新。只要看板进程持续运行，无需额外的外部定时任务。
+  - 触发时间由 `dashboards/matres_app.py` 顶部的 `_DAILY_REFRESH_HOUR` / `_DAILY_REFRESH_MINUTE` 常量控制。
+  - 调度仅在看板进程存活时触发；若 VM 关机或进程被结束，则当次跳过。
+- 看板在 VM 常驻运行（BAT 启动、任务计划或 NSSM），以保证内置每日刷新能正常触发。
+- 如需双保险，仍可用 Windows 任务计划定时跑 `scripts/matres_pipeline.py` 作为后备。
 - 邮件仅发 URL，不发送“离线 HTML 完整交互”预期
 
 ## 10）业务逻辑与计算口径
@@ -257,6 +260,17 @@ CLI 用法：
 - 写入 `.force_data_refresh` 标记文件；看板每 5 秒轮询一次，自动获取最新数据
 - 使用场景：手动编辑了已处理数据文件后、其他进程已更新 CSV 文件时
 
+#### 11.0.1a Pipeline 触发冷却（Cooldown）
+- 每次触发 Pipeline（手动按钮或定时任务）都受 **60 秒冷却** 限制（`dashboards/matres_app.py` 中的 `_PIPELINE_COOLDOWN_SECONDS`）。
+- 冷却期内再次触发会被拦截，提示“Please wait Ns”，避免重复运行。
+- 每次运行前会先删除上一次残留的 `pipeline_progress.json`，确保进度条从 0% 开始，而不是瞬间跳到 100%。
+
+#### 11.0.1b 每日自动刷新调度
+- 后台守护线程（`daily-refresh`）每天 **上午 9:00（VM 本地时间）** 运行一次全量 Pipeline，完成后写入新的数据版本号，使所有打开的浏览器自动刷新。
+- 复用与手动“Run Pipeline & Refresh”按钮相同的子进程 + 进度机制。
+- 通过 `dashboards/matres_app.py` 顶部的 `_DAILY_REFRESH_HOUR` / `_DAILY_REFRESH_MINUTE` 配置触发时间。
+- 依赖看板进程持续运行；若 9:00 时进程未存活则当次跳过。
+
 #### 11.0.2 Master Data Update 详细说明
 - **Scan Missing Data**：扫描 Production Volume 报表中所有物料，检查两类缺失：
   - **Seg 缺失**：物料代码在 Level1 映射文件（`HairCare Code List By Seg_Update Version.xlsx`）中找不到
@@ -280,6 +294,7 @@ CLI 用法：
   - `Backup Snapshot`：一键导出当前看板快照（Excel + CSV 历史目录）。
   - `Refresh Mail & Open HTML`：一键刷新周报邮件内容并在新标签页打开最新 HTML 预览。
   - 每 15 分钟自动从 CSV 刷新数据（仅读取，不运行 Pipeline）。
+  - **每日自动刷新**：后台调度每天上午 9:00（VM 本地时间）自动运行全量 Pipeline 并刷新所有已连接的浏览器。
 - `Demand Assumption`
   - 包含 `Demand System LBE`、`Demand System LBE IYA`、`Demand System LBE + Supply System Protection`、`Demand System LBE + Supply System Protection IYA`。
   - Supply Protection 拆分为 `(PP + Base)` 与 `(HKTW + ESS)` 两块。

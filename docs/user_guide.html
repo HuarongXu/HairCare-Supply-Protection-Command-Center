@@ -1000,6 +1000,16 @@
                 <tr><td>TD</td><td>仅 TD Validation</td><td>~5 秒</td></tr>
                 <tr><td>Production</td><td>仅 Production Data</td><td>~8 秒</td></tr>
             </table>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">⏰</span>
+                <div><strong>每日自动刷新</strong>：看板已内置定时任务，每天 <strong>上午 9:00</strong>（服务器本地时间）自动运行一次全量 Pipeline，并通知所有打开的浏览器自动刷新，无需手动操作。前提是看板进程保持运行。</div>
+            </div>
+
+            <div class="callout callout-info">
+                <span class="callout-icon">💡</span>
+                <div><strong>60 秒冷却</strong>：连续两次触发 Pipeline 之间有 60 秒冷却时间。冷却期内再次点击会提示稍候，避免重复运行。</div>
+            </div>
         </div>
 
         <!-- ================================================================ -->

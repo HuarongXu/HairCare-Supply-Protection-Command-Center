@@ -103,8 +103,11 @@ Install already included in requirements.
 - Try `http://localhost:8050` and disable proxy for localhost
 
 ## 9) Suggested Operations
-- Schedule `scripts/matres_pipeline.py` via Windows Task Scheduler
-- Keep dashboard service running on VM (Task Scheduler or NSSM)
+- **Daily auto-refresh is built into the dashboard**: a background scheduler thread runs the full pipeline once per day at **09:00 local time** (of the VM) and notifies all connected browsers to refresh automatically. No external scheduler is required as long as the dashboard process stays running.
+  - The trigger time is controlled by `_DAILY_REFRESH_HOUR` / `_DAILY_REFRESH_MINUTE` constants near the top of `dashboards/matres_app.py`.
+  - The scheduler only fires while the dashboard process is alive; if the VM is shut down or the process is killed overnight, the run is skipped.
+- Keep dashboard service running on VM (BAT startup, Task Scheduler, or NSSM) so the built-in daily refresh can fire.
+- Optionally, you can still schedule `scripts/matres_pipeline.py` via Windows Task Scheduler as a fallback.
 - Share only URL by email (do not send HTML expecting full Dash callbacks)
 
 ## 10) Business Logic & Calculation Rules
@@ -265,6 +268,17 @@ Password-protected admin panel (password in `config/config.json` field `admin_pa
 - Writes a `.force_data_refresh` flag file; the dashboard polls every 5 seconds and picks up the new data automatically
 - Use case: after manually editing processed data files, or when another process has updated CSVs externally
 
+#### 11.0.1a Pipeline Trigger Cooldown
+- Every pipeline trigger (manual button or scheduled run) is rate-limited by a **60-second cooldown** (`_PIPELINE_COOLDOWN_SECONDS` in `dashboards/matres_app.py`).
+- A second trigger inside the cooldown window is blocked and shows a "Please wait Ns" message instead of starting a duplicate run.
+- Before each run, any stale `pipeline_progress.json` from a previous run is deleted so the progress bar starts from 0% rather than jumping to 100%.
+
+#### 11.0.1b Daily Auto-Refresh Scheduler
+- A background daemon thread (`daily-refresh`) runs the **full pipeline once per day at 09:00 local time** of the VM, then writes a new data version so all open browsers reload automatically.
+- Reuses the same subprocess + progress mechanism as the manual "Run Pipeline & Refresh" button.
+- Configured via `_DAILY_REFRESH_HOUR` / `_DAILY_REFRESH_MINUTE` at the top of `dashboards/matres_app.py`.
+- Requires the dashboard process to stay running; the run is skipped if the process is not alive at 09:00.
+
 #### 11.0.2 Master Data Update Details
 - **Scan Missing Data**: Scans all materials in Production Volume reports for two types of missing data:
   - **Seg 缺失 (Missing Segment)**: Material code not found in Level1 mapping file (`HairCare Code List By Seg_Update Version.xlsx`)
@@ -288,6 +302,7 @@ Password-protected admin panel (password in `config/config.json` field `admin_pa
 	- `Backup Snapshot`: one-click export of current dashboard snapshot (Excel + CSV history folder).
 	- `Refresh Mail & Open HTML`: one-click regenerate weekly mail content and open the latest HTML preview in a new tab.
 	- Auto-refresh every 15 minutes (re-reads CSV only, does not re-run pipeline).
+	- **Daily auto-refresh**: a background scheduler runs the full pipeline once per day at 09:00 (VM local time) and refreshes all connected browsers automatically.
 - `Demand Assumption`
 	- Demand System LBE / Demand System LBE IYA / Demand System LBE + Supply System Protection / Demand System LBE + Supply System Protection IYA.
 	- Supply Protection split tables: `(PP + Base)` and `(HKTW + ESS)`.
