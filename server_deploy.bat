@@ -215,11 +215,13 @@ REM --- server_start.bat ---
   echo.
   echo echo [INFO] Starting dashboard with Waitress...
   echo echo [INFO] Local URL: http://localhost:8050
-  echo for /f "tokens=2 delims=: " %%%%I in ^('ipconfig ^| findstr /i "IPv4"'^) do ^(
-  echo   set "_IP=%%%%I"
-  echo   set "_IP=^^!_IP: =^^!"
-  echo   if not "^^!_IP^^!"=="" echo [INFO] LAN URL: http://^^!_IP^^!:8050
+  echo set "_LANIP="
+  echo for /f "tokens=2 delims=:" %%%%I in ^('ipconfig ^^^| findstr /i "IPv4"'^) do ^(
+  echo   if not defined _LANIP ^(
+  echo     for /f "tokens=* delims= " %%%%A in ^("%%%%I"^) do set "_LANIP=%%%%A"
+  echo   ^)
   echo ^)
+  echo if defined _LANIP echo [INFO] LAN URL: http://^^!_LANIP^^!:8050
   echo python -m waitress --listen=0.0.0.0:8050 dashboards.matres_app:app.server
 ) > "%DEPLOY_DIR%\server_start.bat"
 

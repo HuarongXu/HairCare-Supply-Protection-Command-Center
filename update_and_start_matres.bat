@@ -150,11 +150,13 @@ REM -- Start dashboard --
 echo ========================================
 echo   Starting Dashboard ...
 echo   URL (local): http://localhost:8050
-for /f "tokens=2 delims=: " %%I in ('ipconfig ^| findstr /i "IPv4"') do (
-  set "_IP=%%I"
-  set "_IP=!_IP: =!"
-  if not "!_IP!"=="" echo   URL (LAN):   http://!_IP!:8050
+set "_LANIP="
+for /f "tokens=2 delims=:" %%I in ('ipconfig ^| findstr /i "IPv4"') do (
+  if not defined _LANIP (
+    for /f "tokens=* delims= " %%A in ("%%I") do set "_LANIP=%%A"
+  )
 )
+if defined _LANIP echo   URL (LAN):   http://!_LANIP!:8050
 echo   Press Ctrl+C to stop
 echo ========================================
 echo.
