@@ -65,6 +65,22 @@ def _write_data_version() -> str:
     return ts
 
 
+def _format_data_version_display() -> Tuple[str, bool]:
+    """Return (human-readable last-refresh time, refreshed_today) for the header
+    badge. When the timestamp is from today the badge is styled as fresh (green);
+    otherwise it is styled as stale (amber) so users can tell at a glance whether
+    the scheduled daily refresh actually ran."""
+    raw = _read_data_version()
+    if not raw:
+        return ("no data yet", False)
+    try:
+        dt = datetime.fromisoformat(raw)
+    except (ValueError, TypeError):
+        return (raw, False)
+    refreshed_today = dt.date() == datetime.now().date()
+    return (dt.strftime("%Y-%m-%d %H:%M"), refreshed_today)
+
+
 @dataclass
 class AppConfig:
     processed_dir: Path
@@ -3935,6 +3951,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     pde_alerts = pd.DataFrame(data_bundle["pde_alerts"])
     request_details = load_request_details(cfg)
     details_version = data_bundle.get("request_details_version")
+    _dv_text, _dv_today = _format_data_version_display()
     metrics = compute_metrics(monthly_item, pde_alerts, request_details)
     role_options = build_role_options(monthly_requester)
     default_role = role_options[0]["value"] if role_options else ROLE_ALL_VALUE
@@ -5060,6 +5077,23 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                     html.Div(
                         style={"display": "flex", "gap": "6px", "marginLeft": "auto", "alignSelf": "center", "alignItems": "center"},
                         children=[
+                            html.Span(
+                                id="last-refresh-badge",
+                                children=f"Data updated: {_dv_text}",
+                                title="Time the dashboard data was last refreshed by the pipeline. "
+                                      "Green = refreshed today; amber = today's scheduled refresh has not run yet. "
+                                      "Open tabs reload automatically when new data arrives.",
+                                style={
+                                    "fontSize": "12px",
+                                    "fontWeight": "600",
+                                    "padding": "4px 10px",
+                                    "borderRadius": "999px",
+                                    "whiteSpace": "nowrap",
+                                    "color": "#065f46" if _dv_today else "#92400e",
+                                    "backgroundColor": "#d1fae5" if _dv_today else "#fef3c7",
+                                    "border": f"1px solid {'#6ee7b7' if _dv_today else '#fcd34d'}",
+                                },
+                            ),
                             html.A(
                                 html.Span("\U0001F4D6", style={
                                     "fontSize": "18px",
@@ -6687,6 +6721,21 @@ def create_app() -> Dash:
         if guide_path.exists():
             return Response(guide_path.read_text(encoding="utf-8"), mimetype="text/html; charset=utf-8")
         return Response("User guide not found.", status=404)
+
+    @app.server.route("/data-version", methods=["GET"])
+    def serve_data_version() -> Response:
+        """Return the current server-side data version as plain text.
+
+        The browser polls this endpoint (see assets/auto_reload.js) and does a
+        full page reload when the value changes, so every open tab always shows
+        the latest data after the daily/manual pipeline run. Kept independent of
+        the Dash callback graph so it keeps working even if the dashboard process
+        was restarted while a tab was left open."""
+        resp = Response(_read_data_version(), mimetype="text/plain; charset=utf-8")
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
 
     @app.server.route("/mail-preview/latest", methods=["GET"])
     def mail_preview_latest() -> Response:
