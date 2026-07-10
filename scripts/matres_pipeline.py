@@ -3964,6 +3964,23 @@ def _write_progress(progress_file: Optional[Path], data: dict) -> None:
     progress_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
+def _write_data_version(processed_dir: Path) -> None:
+    """Stamp ``processed_dir/.data_version`` with the local completion time.
+
+    The dashboard header reads this file to show the "last refreshed" time and to
+    notify connected browsers. Writing it here means every successful pipeline run
+    updates that time — including standalone runs launched by the one-click .bat,
+    not only refreshes triggered from the dashboard UI.
+    """
+    try:
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        version_file = processed_dir / ".data_version"
+        version_file.write_text(datetime.now().isoformat(), encoding="utf-8")
+        logging.info("Wrote data version to %s", version_file)
+    except OSError as exc:
+        logging.warning("Could not write data version file: %s", exc)
+
+
 def _run_stage_supply(cfg: PipelineConfig) -> None:
     """Read MR workbook → clean → produce all supply-side CSVs."""
     df_raw = read_workbook(cfg)
@@ -4126,6 +4143,7 @@ def run_pipeline_staged(
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     })
+    _write_data_version(cfg.processed_dir)
     logging.info("Pipeline completed: %d/%d stages", total, total)
 
 
