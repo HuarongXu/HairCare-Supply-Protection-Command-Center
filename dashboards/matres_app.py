@@ -3114,7 +3114,26 @@ def build_td_gap_detail_table(
     if str(selected_row.get("Version Group", "")).strip() != "Gap":
         return "GAP Difference Details（请选择上方 GAP 行中的月份列）", columns, [], style_data_conditional
 
-    prod_line = str(selected_row.get("Prod Line", "")).strip()
+    validation_prod_line = str(selected_row.get("Prod Line", "")).strip()
+
+    # When a row in the Level2 GAP Details table is selected, that row's
+    # Prod Line + Level2 drives this detail table, regardless of which
+    # Base/PP/Total row is highlighted in the validation table above.
+    # (Previously the Level2 filter only applied when its Prod Line matched
+    # the validation selection, so clicking a Level2 row often did nothing.)
+    selected_level2 = ""
+    selected_level2_prod_line = ""
+    if level2_active_cell and level2_rows:
+        level2_row_index = level2_active_cell.get("row")
+        if isinstance(level2_row_index, int) and 0 <= level2_row_index < len(level2_rows):
+            selected_level2_row = level2_rows[level2_row_index]
+            candidate_level2 = str(selected_level2_row.get("Level2", "")).strip()
+            candidate_prod_line = str(selected_level2_row.get("Prod Line", "")).strip()
+            if candidate_prod_line in {"Base", "PP"} and candidate_level2:
+                selected_level2 = candidate_level2
+                selected_level2_prod_line = candidate_prod_line
+
+    prod_line = selected_level2_prod_line or validation_prod_line
     if prod_line not in {"Base", "PP", "Total"}:
         return "GAP Difference Details（请选择上方 GAP 的 Base/PP/Total 行）", columns, [], style_data_conditional
 
@@ -3133,17 +3152,10 @@ def build_td_gap_detail_table(
     if filtered.empty:
         return f"GAP Difference Details - {prod_line} / {month_col}（无明细）", columns, [], style_data_conditional
 
-    selected_level2 = ""
-    if level2_active_cell and level2_rows:
-        level2_row_index = level2_active_cell.get("row")
-        if isinstance(level2_row_index, int) and 0 <= level2_row_index < len(level2_rows):
-            selected_level2_row = level2_rows[level2_row_index]
-            selected_level2 = str(selected_level2_row.get("Level2", "")).strip()
-            selected_level2_prod_line = str(selected_level2_row.get("Prod Line", "")).strip()
-            if selected_level2 and selected_level2_prod_line in {"Base", "PP"} and selected_level2_prod_line == prod_line:
-                normalized_selected_level2 = normalize_level2_label(selected_level2)
-                filtered["Level2"] = filtered.get("Level2", "").fillna("").apply(normalize_level2_label)
-                filtered = filtered[filtered["Level2"].eq(normalized_selected_level2)].copy()
+    if selected_level2 and "Level2" in filtered.columns:
+        normalized_selected_level2 = normalize_level2_label(selected_level2)
+        filtered["Level2"] = filtered["Level2"].fillna("").apply(normalize_level2_label)
+        filtered = filtered[filtered["Level2"].eq(normalized_selected_level2)].copy()
 
     for col in ["Current", "Previous", "Gap"]:
         filtered[col] = pd.to_numeric(filtered[col], errors="coerce").fillna(0).round().astype(int)
@@ -4122,6 +4134,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                                             html.Li("R Material: Material Protection with rolling delay"),
                                             html.Li("FG Rolling: FG Protection with rolling delay"),
                                             html.Li("RM Material: RM Protection"),
+                                            html.Li("R TOC: Only for DSTC"),
                                         ],
                                     ),
                                 ],
@@ -5329,6 +5342,31 @@ def build_admin_layout(cfg: AppConfig) -> html.Div:
 
 
 def register_callbacks(app: Dash, cfg: AppConfig) -> None:
+
+    # ── keep the "Data updated" header badge live ──
+    # The layout is pre-built once at process start, so the badge text/colour
+    # were frozen to whatever .data_version held then. After a manual/scheduled
+    # pipeline run updates .data_version, open tabs must reflect the new time
+    # WITHOUT a dashboard process restart. Poll the version file on the existing
+    # 5s interval and refresh the badge children + style accordingly.
+    @app.callback(
+        Output("last-refresh-badge", "children"),
+        Output("last-refresh-badge", "style"),
+        Input("force-refresh-poll", "n_intervals"),
+    )
+    def _update_last_refresh_badge(_n_intervals):
+        text, refreshed_today = _format_data_version_display()
+        style = {
+            "fontSize": "12px",
+            "fontWeight": "600",
+            "padding": "4px 10px",
+            "borderRadius": "999px",
+            "whiteSpace": "nowrap",
+            "color": "#065f46" if refreshed_today else "#92400e",
+            "backgroundColor": "#d1fae5" if refreshed_today else "#fef3c7",
+            "border": f"1px solid {'#6ee7b7' if refreshed_today else '#fcd34d'}",
+        }
+        return f"Data updated: {text}", style
 
     # ── unified refresh + pipeline progress callback ──────────────
     @app.callback(
@@ -6742,10 +6780,16 @@ def create_app() -> Dash:
         try:
             html_file = regenerate_weekly_mail_preview(cfg)
             html_text = html_file.read_text(encoding="utf-8")
-            return Response(html_text, mimetype="text/html; charset=utf-8")
+            resp = Response(html_text, mimetype="text/html; charset=utf-8")
         except Exception:
             logging.exception("Failed to regenerate/open weekly mail preview")
-            return Response("Failed to refresh weekly mail preview. Please check server logs.", status=500)
+            resp = Response("Failed to refresh weekly mail preview. Please check server logs.", status=500)
+        # Always regenerate on every open: forbid browser caching so a stale
+        # mail preview is never served after the pipeline refreshes the data.
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        resp.headers["Pragma"] = "no-cache"
+        resp.headers["Expires"] = "0"
+        return resp
 
     # ── IP-based access control ──────────────────────────────────
     # Disabled: server runs on P&G corporate LAN (143.x.x.x) which is
