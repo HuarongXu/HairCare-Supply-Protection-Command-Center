@@ -215,6 +215,20 @@ def _sort_month_values(values: Iterable[str]) -> list[str]:
     return sorted(valid_values, key=key_func)
 
 
+def _current_and_future_month_window(sorted_months: Iterable[str]) -> tuple[str, list[str]]:
+    """Return month window as [current month, future months], excluding past months.
+
+    Current month is based on today's date, not the earliest month found in source files.
+    """
+    current_month = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
+    current_period = pd.Period(current_month, freq="M")
+    future_months = [
+        m for m in sorted_months
+        if pd.Period(str(m), freq="M") > current_period
+    ]
+    return current_month, [current_month, *future_months]
+
+
 def _normalize_month_label(raw_label: str) -> Optional[str]:
     """Normalise month label from either MM.YYYY or YYYY-MM format."""
     text = str(raw_label).strip()
@@ -843,8 +857,13 @@ def build_production_data_summary(
         production_vol_reports = vol_report_files if vol_report_files is not None else []
     else:
         mtd_reports, production_vol_reports = _discover_production_reports(root)
-        # Exclude weekly files from the monthly summary
-        production_vol_reports = [p for p in production_vol_reports if "weekly" not in p.name.lower()]
+        # Exclude weekly files from the monthly summary; deduplicate daily files
+        # to keep only the latest snapshot per report type (avoids summing all
+        # accumulated daily exports, which would multiply values by file count)
+        production_vol_reports = _deduplicate_weekly_reports(
+            [p for p in production_vol_reports if "weekly" not in p.name.lower()]
+        )
+        mtd_reports = _deduplicate_weekly_reports(mtd_reports)
 
     if not mtd_reports:
         logging.warning("No MTD report found under %s", root)
@@ -1061,8 +1080,7 @@ def build_production_data_summary(
     if not sorted_months:
         return pd.DataFrame(columns=base_columns)
 
-    month_window = sorted_months
-    current_month = month_window[0]
+    current_month, month_window = _current_and_future_month_window(sorted_months)
     future_months = month_window[1:]
 
     if current_month not in production_vol.columns:
@@ -1120,8 +1138,12 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
     mtd_reports, production_vol_reports = _discover_production_reports(root)
-    # Exclude weekly files from the monthly summary
-    production_vol_reports = [p for p in production_vol_reports if "weekly" not in p.name.lower()]
+    # Exclude weekly files; deduplicate daily files to keep only the latest
+    # snapshot per report type (avoids summing all accumulated daily exports)
+    production_vol_reports = _deduplicate_weekly_reports(
+        [p for p in production_vol_reports if "weekly" not in p.name.lower()]
+    )
+    mtd_reports = _deduplicate_weekly_reports(mtd_reports)
 
     if not production_vol_reports:
         logging.warning("No Production Vol report found under %s", root)
@@ -1360,11 +1382,10 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     )
 
     sorted_months = _sort_month_values(month_labels)
-    month_window = sorted_months
-    if not month_window:
+    if not sorted_months:
         return pd.DataFrame(columns=base_columns)
 
-    current_month = month_window[0]
+    current_month, month_window = _current_and_future_month_window(sorted_months)
 
     for month in month_window:
         result[month] = pd.to_numeric(result.get(month, 0.0), errors="coerce").fillna(0.0)
@@ -2259,6 +2280,12 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
     production_root = cfg.production_data_dir
 
     mtd_reports, production_vol_reports = _discover_production_reports(production_root)
+    # Exclude weekly files; deduplicate daily files to keep only the latest
+    # snapshot per report type (avoids summing all accumulated daily exports)
+    production_vol_reports = _deduplicate_weekly_reports(
+        [p for p in production_vol_reports if "weekly" not in p.name.lower()]
+    )
+    mtd_reports = _deduplicate_weekly_reports(mtd_reports)
 
     if not production_vol_reports:
         return pd.DataFrame(columns=base_cols)
@@ -2435,8 +2462,7 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
     sorted_months = _sort_month_values(month_labels)
     if not sorted_months:
         return pd.DataFrame(columns=base_cols)
-    month_window = sorted_months
-    current_month = month_window[0]
+    current_month, month_window = _current_and_future_month_window(sorted_months)
 
     for m in month_window:
         prod_material[m] = pd.to_numeric(prod_material.get(m, 0.0), errors="coerce").fillna(0.0)
