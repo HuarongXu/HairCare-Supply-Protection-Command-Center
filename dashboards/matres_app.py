@@ -1839,6 +1839,51 @@ def build_production_data_table_by_plant(
     return columns, grouped[ordered_cols].to_dict("records")
 
 
+def filter_production_version_display(
+    df: pd.DataFrame,
+    keep_plants: List[str],
+) -> pd.DataFrame:
+    """Restrict the version comparison frame to the displayed plants and
+    recompute each section's GC Total from only those plants.
+
+    The pipeline computes GC Total over ALL plants in the source data (e.g.
+    0386, 1864, A673, A868). The dashboard only displays a subset
+    (0386, 1864, A868), so the pre-computed GC Total would otherwise include
+    the hidden plant (A673) and no longer equal the sum of the visible rows.
+    Here we drop the hidden plant rows and re-sum GC Total per Version Group
+    (Current / Previous / Gap) so the total matches the displayed plants.
+    """
+    if df.empty:
+        return df
+
+    working = df.copy()
+    working["Plant"] = working["Plant"].fillna("").astype(str).str.strip()
+    working["Version Group"] = working["Version Group"].fillna("").astype(str).str.strip()
+
+    keep_plants = [str(p).strip() for p in keep_plants]
+    keep_set = set(keep_plants) | {"GC Total", ""}
+    filtered = working[working["Plant"].isin(keep_set)].reset_index(drop=True)
+
+    numeric_cols = [
+        c for c in filtered.columns
+        if c not in ("Version", "Version Group", "Plant")
+    ]
+
+    for group in filtered["Version Group"].unique():
+        if not group:
+            continue
+        group_mask = filtered["Version Group"] == group
+        plant_mask = group_mask & filtered["Plant"].isin(keep_plants)
+        total_mask = group_mask & (filtered["Plant"] == "GC Total")
+        if not total_mask.any():
+            continue
+        for col in numeric_cols:
+            plant_vals = pd.to_numeric(filtered.loc[plant_mask, col], errors="coerce").fillna(0.0)
+            filtered.loc[total_mask, col] = round(float(plant_vals.sum()), 1)
+
+    return filtered
+
+
 def build_production_version_comparison_table(
     df: pd.DataFrame,
 ) -> Tuple[List[Dict], List[Dict]]:
@@ -4013,8 +4058,9 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     )
     production_version_df = pd.DataFrame(data_bundle.get("production_version_compare", []))
     if not production_version_df.empty:
-        keep = production_version_df["Plant"].fillna("").isin(["1864", "0386", "A868", "GC Total", ""])
-        production_version_df = production_version_df[keep].reset_index(drop=True)
+        production_version_df = filter_production_version_display(
+            production_version_df, production_group_1
+        )
     production_version_columns, production_version_rows = build_production_version_comparison_table(production_version_df)
     production_version_styles = build_production_version_style_data_conditional(production_version_columns)
 
@@ -5710,8 +5756,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         }
         production_version_df = pd.DataFrame(data.get("production_version_compare", []))
         if not production_version_df.empty:
-            keep = production_version_df["Plant"].fillna("").isin(["1864", "0386", "A868", "GC Total", ""])
-            production_version_df = production_version_df[keep].reset_index(drop=True)
+            production_version_df = filter_production_version_display(
+                production_version_df, production_group_1
+            )
         production_version_columns, production_version_rows = build_production_version_comparison_table(production_version_df)
         production_version_styles = build_production_version_style_data_conditional(production_version_columns)
         production_level_columns_1, production_level_rows_1 = build_production_data_table_by_plant_level(
