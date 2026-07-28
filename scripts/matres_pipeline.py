@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -215,20 +216,6 @@ def _sort_month_values(values: Iterable[str]) -> list[str]:
     return sorted(valid_values, key=key_func)
 
 
-def _current_and_future_month_window(sorted_months: Iterable[str]) -> tuple[str, list[str]]:
-    """Return month window as [current month, future months], excluding past months.
-
-    Current month is based on today's date, not the earliest month found in source files.
-    """
-    current_month = pd.Timestamp.today().to_period("M").strftime("%Y-%m")
-    current_period = pd.Period(current_month, freq="M")
-    future_months = [
-        m for m in sorted_months
-        if pd.Period(str(m), freq="M") > current_period
-    ]
-    return current_month, [current_month, *future_months]
-
-
 def _normalize_month_label(raw_label: str) -> Optional[str]:
     """Normalise month label from either MM.YYYY or YYYY-MM format."""
     text = str(raw_label).strip()
@@ -352,6 +339,108 @@ def _deduplicate_weekly_reports(reports: list[Path]) -> list[Path]:
         if type_key not in type_map or date_str > type_map[type_key][0]:
             type_map[type_key] = (date_str, p)
     return sorted(v[1] for v in type_map.values())
+
+
+class ReportUnavailableError(RuntimeError):
+    """A report file exists on disk but its content cannot be read locally.
+
+    This is almost always a OneDrive "Files On-Demand" placeholder whose content
+    has not been hydrated (downloaded) to the local disk. Reading such a file
+    raises ``OSError: [Errno 22] Invalid argument``. We surface this loudly
+    instead of silently skipping the file, because a skipped report would make
+    the affected plant's MTD / production silently collapse to 0 while the file
+    still appears to "have data" in the folder.
+    """
+
+
+# Windows file attributes that mark a OneDrive Files On-Demand placeholder whose
+# content is not present on local disk.
+_FILE_ATTRIBUTE_OFFLINE = 0x1000
+_FILE_ATTRIBUTE_RECALL_ON_OPEN = 0x40000
+_FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS = 0x400000
+_ONEDRIVE_PLACEHOLDER_MASK = (
+    _FILE_ATTRIBUTE_OFFLINE
+    | _FILE_ATTRIBUTE_RECALL_ON_OPEN
+    | _FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+)
+
+
+def _is_onedrive_placeholder(path: Path) -> bool:
+    """Return True if *path* looks like an un-hydrated OneDrive online-only file."""
+    try:
+        attrs = int(getattr(path.stat(), "st_file_attributes", 0))
+    except OSError:
+        return False
+    return bool(attrs & _ONEDRIVE_PLACEHOLDER_MASK)
+
+
+def _ensure_report_readable(path: Path, *, retries: int = 6, delay: float = 2.5) -> None:
+    """Ensure *path*'s content is fully available locally, hydrating a OneDrive
+    Files On-Demand placeholder if necessary.
+
+    Reading the whole file forces OneDrive on-demand hydration of every data
+    block; reading only the first bytes is not enough because a partially
+    cached placeholder can serve the header yet still fail on a full parse. We
+    retry a few times to give the sync client time to download the content.
+    Raises :class:`ReportUnavailableError` if the content still cannot be read.
+    """
+    last_err: Optional[Exception] = None
+    for attempt in range(1, retries + 1):
+        try:
+            with open(path, "rb") as handle:
+                while handle.read(1024 * 1024):
+                    pass
+            if not _is_onedrive_placeholder(path):
+                return
+            last_err = OSError("file still marked online-only after read")
+        except OSError as exc:
+            last_err = exc
+        if attempt < retries:
+            logging.warning(
+                "Report '%s' is not yet available locally (attempt %d/%d); "
+                "waiting %.1fs for OneDrive to download it...",
+                path.name, attempt, retries, delay,
+            )
+            time.sleep(delay)
+
+    if _is_onedrive_placeholder(path):
+        hint = (
+            "This is a OneDrive online-only placeholder whose content has not "
+            "been downloaded. In File Explorer, right-click the '0.Data Base' "
+            "folder and choose 'Always keep on this device', then wait until "
+            "every file shows a green check (not a cloud icon) before running "
+            "the pipeline."
+        )
+    else:
+        hint = "The file content could not be read from disk."
+    raise ReportUnavailableError(
+        f"Report file '{path.name}' exists but its content is not available "
+        f"locally. {hint} (underlying error: {last_err})"
+    )
+
+
+def _ensure_reports_available(reports: Iterable[Path]) -> None:
+    """Hydrate/validate every report file, failing loud if any is unreadable.
+
+    Runs BEFORE the per-file read loops so that an un-hydrated OneDrive
+    placeholder aborts the run with a clear message instead of being silently
+    skipped (which would collapse the affected plant's numbers to 0).
+    """
+    unavailable: list[str] = []
+    for path in reports:
+        try:
+            _ensure_report_readable(path)
+        except ReportUnavailableError as exc:
+            logging.error("%s", exc)
+            unavailable.append(path.name)
+    if unavailable:
+        raise ReportUnavailableError(
+            "The following report file(s) could not be read locally "
+            "(OneDrive content not downloaded): "
+            + ", ".join(sorted(unavailable))
+            + ". Wait for OneDrive sync to finish (a green check on every file), "
+            "then re-run the pipeline."
+        )
 
 
 def _discover_production_reports(root: Path) -> tuple[list[Path], list[Path]]:
@@ -792,6 +881,45 @@ def read_production_schedule_report(report_path: Path) -> pd.DataFrame:
         except Exception:
             continue
 
+    # Final, tolerant fallback: some SAP tab exports contain "ragged" rows where
+    # trailing empty columns are truncated (e.g. a row with 15 fields when the
+    # header has 20). pandas' tab reader aborts the WHOLE file on such rows
+    # ("unexpected end of data"), which would silently drop every plant in the
+    # report. Parse the lines by hand and pad/truncate each row to the header
+    # width so no data is lost.
+    raw_bytes = report_path.read_bytes()
+    for encoding in ["utf-16", "utf-8-sig", "utf-8", "latin1"]:
+        try:
+            text = raw_bytes.decode(encoding)
+        except Exception:
+            continue
+        lines = text.splitlines()
+        header_idx = None
+        for idx, line in enumerate(lines[:300]):
+            text_l = line.strip().lower()
+            if "\t" in line and "plant" in text_l and "material" in text_l and "startdate" in text_l:
+                header_idx = idx
+                break
+        if header_idx is None:
+            continue
+        header = lines[header_idx].split("\t")
+        ncols = len(header)
+        rows: list[list[str]] = []
+        for line in lines[header_idx + 1:]:
+            if not line.strip():
+                continue
+            fields = line.split("\t")
+            if len(fields) < ncols:
+                fields = fields + [""] * (ncols - len(fields))
+            elif len(fields) > ncols:
+                fields = fields[:ncols]
+            rows.append(fields)
+        if not rows:
+            continue
+        df_manual = drop_empty_unnamed_columns(pd.DataFrame(rows, columns=header))
+        if looks_like_production_table(df_manual):
+            return df_manual
+
     raise ValueError(f"Failed to parse production report: {report_path}")
 
 
@@ -823,7 +951,25 @@ def read_production_volume_report(report_path: Path) -> pd.DataFrame:
                     skiprows=header_idx,
                 )
             except Exception:
-                continue
+                # Tolerant fallback for "ragged" SAP exports where some rows have
+                # trailing columns truncated. pandas aborts the whole file on
+                # such rows; parse by hand and pad/truncate to the header width
+                # so a single bad row cannot silently drop the entire report.
+                header_fields = lines[header_idx].split("\t")
+                ncols = len(header_fields)
+                rows: list[list[str]] = []
+                for line in lines[header_idx + 1:]:
+                    if not line.strip():
+                        continue
+                    fields = line.split("\t")
+                    if len(fields) < ncols:
+                        fields = fields + [""] * (ncols - len(fields))
+                    elif len(fields) > ncols:
+                        fields = fields[:ncols]
+                    rows.append(fields)
+                if not rows:
+                    continue
+                df = pd.DataFrame(rows, columns=header_fields)
 
             df = df.dropna(axis=1, how="all")
             df = df[[col for col in df.columns if not str(col).strip().lower().startswith("unnamed")]]
@@ -857,13 +1003,12 @@ def build_production_data_summary(
         production_vol_reports = vol_report_files if vol_report_files is not None else []
     else:
         mtd_reports, production_vol_reports = _discover_production_reports(root)
-        # Exclude weekly files from the monthly summary; deduplicate daily files
-        # to keep only the latest snapshot per report type (avoids summing all
-        # accumulated daily exports, which would multiply values by file count)
-        production_vol_reports = _deduplicate_weekly_reports(
-            [p for p in production_vol_reports if "weekly" not in p.name.lower()]
-        )
+        # Exclude weekly files from the monthly summary
+        production_vol_reports = [p for p in production_vol_reports if "weekly" not in p.name.lower()]
+        # Daily snapshots are cumulative; keep only the latest date per report
+        # type so the month is not summed multiple times.
         mtd_reports = _deduplicate_weekly_reports(mtd_reports)
+        production_vol_reports = _deduplicate_weekly_reports(production_vol_reports)
 
     if not mtd_reports:
         logging.warning("No MTD report found under %s", root)
@@ -872,6 +1017,10 @@ def build_production_data_summary(
 
     if not mtd_reports and not production_vol_reports:
         return pd.DataFrame(columns=base_columns)
+
+    # Fail loud if any report is an un-hydrated OneDrive placeholder instead of
+    # silently skipping it (which would collapse that plant's MTD to 0).
+    _ensure_reports_available([*mtd_reports, *production_vol_reports])
 
     mtd_monthly_frames: list[pd.DataFrame] = []
     for report_path in mtd_reports:
@@ -1080,7 +1229,8 @@ def build_production_data_summary(
     if not sorted_months:
         return pd.DataFrame(columns=base_columns)
 
-    current_month, month_window = _current_and_future_month_window(sorted_months)
+    month_window = sorted_months
+    current_month = month_window[0]
     future_months = month_window[1:]
 
     if current_month not in production_vol.columns:
@@ -1138,16 +1288,17 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
     mtd_reports, production_vol_reports = _discover_production_reports(root)
-    # Exclude weekly files; deduplicate daily files to keep only the latest
-    # snapshot per report type (avoids summing all accumulated daily exports)
-    production_vol_reports = _deduplicate_weekly_reports(
-        [p for p in production_vol_reports if "weekly" not in p.name.lower()]
-    )
+    # Exclude weekly files from the monthly summary
+    production_vol_reports = [p for p in production_vol_reports if "weekly" not in p.name.lower()]
+    # Daily snapshots are cumulative; keep only the latest date per report type.
     mtd_reports = _deduplicate_weekly_reports(mtd_reports)
+    production_vol_reports = _deduplicate_weekly_reports(production_vol_reports)
 
     if not production_vol_reports:
         logging.warning("No Production Vol report found under %s", root)
         return pd.DataFrame(columns=base_columns)
+
+    _ensure_reports_available([*mtd_reports, *production_vol_reports])
 
     level1_mapping = read_level1_mapping(cfg)
     level1_col = cfg.level1_first_level_column
@@ -1382,10 +1533,11 @@ def build_production_data_summary_by_level(root: Path, cfg: PipelineConfig) -> p
     )
 
     sorted_months = _sort_month_values(month_labels)
-    if not sorted_months:
+    month_window = sorted_months
+    if not month_window:
         return pd.DataFrame(columns=base_columns)
 
-    current_month, month_window = _current_and_future_month_window(sorted_months)
+    current_month = month_window[0]
 
     for month in month_window:
         result[month] = pd.to_numeric(result.get(month, 0.0), errors="coerce").fillna(0.0)
@@ -1439,6 +1591,8 @@ def build_production_data_summary_weekly(root: Path, cfg: PipelineConfig) -> pd.
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
     mtd_reports, all_production_vol_reports = _discover_production_reports(root)
+    # Daily snapshots are cumulative; keep only the latest date per report type.
+    mtd_reports = _deduplicate_weekly_reports(mtd_reports)
     production_vol_reports = _deduplicate_weekly_reports(
         [p for p in all_production_vol_reports if "weekly" in p.name.lower()]
     )
@@ -1449,6 +1603,8 @@ def build_production_data_summary_weekly(root: Path, cfg: PipelineConfig) -> pd.
         logging.warning("No weekly Production Vol report found under %s", root)
     if not mtd_reports and not production_vol_reports:
         return pd.DataFrame(columns=base_columns)
+
+    _ensure_reports_available([*mtd_reports, *production_vol_reports])
 
     mtd_monthly_frames: list[pd.DataFrame] = []
     for report_path in mtd_reports:
@@ -1716,6 +1872,8 @@ def build_production_data_summary_by_level_weekly(root: Path, cfg: PipelineConfi
     base_columns = ["Plant", "Level1", "Level2", "MTD", "Left Production", "Current Month Total"]
 
     mtd_reports, all_production_vol_reports = _discover_production_reports(root)
+    # Daily snapshots are cumulative; keep only the latest date per report type.
+    mtd_reports = _deduplicate_weekly_reports(mtd_reports)
     production_vol_reports = _deduplicate_weekly_reports(
         [p for p in all_production_vol_reports if "weekly" in p.name.lower()]
     )
@@ -1723,6 +1881,8 @@ def build_production_data_summary_by_level_weekly(root: Path, cfg: PipelineConfi
     if not production_vol_reports:
         logging.warning("No weekly Production Vol report found under %s", root)
         return pd.DataFrame(columns=base_columns)
+
+    _ensure_reports_available([*mtd_reports, *production_vol_reports])
 
     level1_mapping = read_level1_mapping(cfg)
     level1_col = cfg.level1_first_level_column
@@ -2280,15 +2440,16 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
     production_root = cfg.production_data_dir
 
     mtd_reports, production_vol_reports = _discover_production_reports(production_root)
-    # Exclude weekly files; deduplicate daily files to keep only the latest
-    # snapshot per report type (avoids summing all accumulated daily exports)
-    production_vol_reports = _deduplicate_weekly_reports(
-        [p for p in production_vol_reports if "weekly" not in p.name.lower()]
-    )
+    # Exclude weekly files and keep only the latest (cumulative) snapshot per
+    # report type, matching build_production_data_summary_by_level.
+    production_vol_reports = [p for p in production_vol_reports if "weekly" not in p.name.lower()]
     mtd_reports = _deduplicate_weekly_reports(mtd_reports)
+    production_vol_reports = _deduplicate_weekly_reports(production_vol_reports)
 
     if not production_vol_reports:
         return pd.DataFrame(columns=base_cols)
+
+    _ensure_reports_available([*mtd_reports, *production_vol_reports])
 
     xqtc_9su_mapping = read_xqtc_9su_mapping(production_root)
 
@@ -2462,7 +2623,8 @@ def build_td_demand_by_dimension(root: Path, cfg: "PipelineConfig") -> pd.DataFr
     sorted_months = _sort_month_values(month_labels)
     if not sorted_months:
         return pd.DataFrame(columns=base_cols)
-    current_month, month_window = _current_and_future_month_window(sorted_months)
+    month_window = sorted_months
+    current_month = month_window[0]
 
     for m in month_window:
         prod_material[m] = pd.to_numeric(prod_material.get(m, 0.0), errors="coerce").fillna(0.0)
@@ -3990,23 +4152,6 @@ def _write_progress(progress_file: Optional[Path], data: dict) -> None:
     progress_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 
-def _write_data_version(processed_dir: Path) -> None:
-    """Stamp ``processed_dir/.data_version`` with the local completion time.
-
-    The dashboard header reads this file to show the "last refreshed" time and to
-    notify connected browsers. Writing it here means every successful pipeline run
-    updates that time — including standalone runs launched by the one-click .bat,
-    not only refreshes triggered from the dashboard UI.
-    """
-    try:
-        processed_dir.mkdir(parents=True, exist_ok=True)
-        version_file = processed_dir / ".data_version"
-        version_file.write_text(datetime.now().isoformat(), encoding="utf-8")
-        logging.info("Wrote data version to %s", version_file)
-    except OSError as exc:
-        logging.warning("Could not write data version file: %s", exc)
-
-
 def _run_stage_supply(cfg: PipelineConfig) -> None:
     """Read MR workbook → clean → produce all supply-side CSVs."""
     df_raw = read_workbook(cfg)
@@ -4169,7 +4314,6 @@ def run_pipeline_staged(
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     })
-    _write_data_version(cfg.processed_dir)
     logging.info("Pipeline completed: %d/%d stages", total, total)
 
 
