@@ -21,6 +21,10 @@ REM -- Kill old dashboard if running --
 echo [INFO] Stopping old dashboard (if any) ...
 taskkill /f /fi "WINDOWTITLE eq MatRes Dashboard Server" >nul 2>nul
 taskkill /f /fi "WINDOWTITLE eq MatRes One-Click Update + Start" /fi "PID ne %PID%" >nul 2>nul
+REM Also kill whatever is listening on port 8050 (robust regardless of window title)
+for /f "tokens=5" %%P in ('netstat -aon ^| findstr ":8050 " ^| findstr "LISTENING"') do (
+  taskkill /f /pid %%P >nul 2>nul
+)
 timeout /t 3 /nobreak >nul
 echo [OK] Ready.
 echo.

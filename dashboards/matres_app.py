@@ -6628,10 +6628,19 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
 
         messages: List[str] = []
 
-        # Since update_and_start_matres.bat handles EVERYTHING
-        # (git pull → venv → pip → pipeline → start dashboard),
-        # we just need to launch it and exit.
-        messages.append("[restart] Launching update_and_start_matres.bat ...")
+        # Prefer the machine-specific startup bat (update_and_start_matres-<HOST>.bat)
+        # because each computer's bat may differ (venv, URL, machine tweaks). Fall
+        # back to the generic update_and_start_matres.bat when no host-specific one
+        # exists. This must match the bat the operator actually maintains, otherwise
+        # the restart runs a stale/other bat and new code never loads.
+        _host = os.environ.get("COMPUTERNAME", "").strip()
+        _host_bat = _PROJECT_ROOT / f"update_and_start_matres-{_host}.bat" if _host else None
+        if _host_bat is not None and _host_bat.exists():
+            bat_path = _host_bat
+        else:
+            bat_path = _PROJECT_ROOT / "update_and_start_matres.bat"
+
+        messages.append(f"[restart] Launching {bat_path.name} ...")
         messages.append("A new CMD window will open. This page will stop responding.")
         messages.append("Please wait ~2 minutes, then visit http://localhost:8050")
 
@@ -6641,12 +6650,11 @@ def register_admin_callbacks(app: Dash, cfg: AppConfig) -> None:
             import time
             time.sleep(2)
 
-            bat_path = _PROJECT_ROOT / "update_and_start_matres.bat"
             logging.info("Restart: launching %s", bat_path)
 
             if sys.platform == "win32":
                 if not bat_path.exists():
-                    logging.error("update_and_start_matres.bat not found: %s", bat_path)
+                    logging.error("Startup bat not found: %s", bat_path)
                     return
 
                 # Use "start" command to open a NEW independent CMD window.
