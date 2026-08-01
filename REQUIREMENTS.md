@@ -132,10 +132,11 @@ Install already included in requirements.
 - `production_data_summary.csv`
 - `production_data_summary_by_level.csv`
 - `td_demand_by_dimension.csv`
+- `ibpi_hppp_weekly.csv` (IBPI safety-incremental data from Databricks HPPP)
 - `pipeline_progress.json` (pipeline execution progress file)
 
 ### 10.2.1 Staged Pipeline Execution
-The pipeline supports independent stage execution. Four stages can run separately:
+The pipeline supports independent stage execution. Five stages can run separately:
 
 | Stage | Label | Data Source | Output Files |
 |-------|-------|------------|-------------|
@@ -143,6 +144,9 @@ The pipeline supports independent stage execution. Four stages can run separatel
 | `demand` | Demand (HC IDP) | HC IDP Reports | hc_idp_monthly |
 | `td` | TD Validation | HC IDP Reports | td_validation, td_validation_gap_detail |
 | `production` | Production Data | Production Volume files + TD Report | production_data, production_data_by_level, td_demand_by_dimension |
+| `ibpi` | IBPI Safety Incremental (HPPP) | Databricks HPPP | ibpi_hppp_weekly |
+
+The `ibpi` stage is best-effort: if Databricks is unreachable (timeout, missing credentials, or missing dependency) it logs a warning and returns without blocking the rest of the pipeline.
 
 CLI usage:
 ```powershell

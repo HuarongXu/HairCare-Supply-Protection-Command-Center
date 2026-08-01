@@ -127,10 +127,11 @@ netsh advfirewall firewall add rule name="Dash8050" dir=in action=allow protocol
 - `production_data_summary.csv`
 - `production_data_summary_by_level.csv`
 - `td_demand_by_dimension.csv`
+- `ibpi_hppp_weekly.csv`（来自 Databricks HPPP 的 IBPI 安全增量数据）
 - `pipeline_progress.json`（Pipeline 运行进度文件）
 
 ### 10.2.1 Pipeline 分阶段执行
-Pipeline 支持分阶段独立运行，4 个阶段互相独立：
+Pipeline 支持分阶段独立运行，5 个阶段互相独立：
 
 | 阶段 | 名称 | 依赖数据源 | 产出文件 |
 |------|------|-----------|----------|
@@ -138,6 +139,9 @@ Pipeline 支持分阶段独立运行，4 个阶段互相独立：
 | `demand` | Demand (HC IDP) | HC IDP 报表 | hc_idp_monthly |
 | `td` | TD Validation | HC IDP 报表 | td_validation, td_validation_gap_detail |
 | `production` | Production Data | Production Volume 文件 + TD 报表 | production_data, production_data_by_level, td_demand_by_dimension |
+| `ibpi` | IBPI Safety Incremental (HPPP) | Databricks HPPP | ibpi_hppp_weekly |
+
+`ibpi` 阶段为尽力而为（best-effort）：若 Databricks 不可达（超时、缺凭据或缺依赖），仅记录警告并返回，不阻塞其余阶段。
 
 CLI 用法：
 ```powershell
