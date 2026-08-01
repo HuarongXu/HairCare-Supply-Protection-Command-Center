@@ -204,6 +204,7 @@ echo ========================================
 echo.
 
 REM ========== 8) 启动看板（生产模式 Waitress）==========
+title MatRes Dashboard Server
 python -m waitress --listen=0.0.0.0:8050 dashboards.matres_app:app.server
 
 popd
