@@ -23,6 +23,9 @@
             '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">' +
             '<span id="cell-calc-label" style="opacity:0.7;font-size:12px;">SUM</span>' +
             '<span id="cell-calc-value" style="font-weight:700;font-size:18px;">0</span>' +
+            '<span style="opacity:0.4;font-size:14px;">|</span>' +
+            '<span id="cell-calc-avg-label" style="opacity:0.7;font-size:12px;">AVG</span>' +
+            '<span id="cell-calc-avg-value" style="font-weight:700;font-size:18px;">0</span>' +
             '<span id="cell-calc-count" style="opacity:0.6;font-size:12px;"></span>' +
             '<button id="cell-calc-clear" style="background:none;border:1px solid rgba(255,255,255,0.3);color:#f1f5f9;' +
             'border-radius:4px;cursor:pointer;padding:2px 8px;font-size:11px;margin-left:6px;" title="Clear selection">✕</button>' +
@@ -63,7 +66,9 @@
                 count++;
             }
         });
+        var avg = count > 0 ? sum / count : 0;
         document.getElementById('cell-calc-value').textContent = formatNumber(sum);
+        document.getElementById('cell-calc-avg-value').textContent = formatNumber(avg);
         document.getElementById('cell-calc-count').textContent = count + ' cell' + (count !== 1 ? 's' : '');
         w.style.display = 'block';
     }

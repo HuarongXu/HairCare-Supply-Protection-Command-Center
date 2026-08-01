@@ -13,6 +13,9 @@ Thumbs.db
 # Local config
 config/config.json
 
+# Local secrets / environment (Databricks credentials etc.)
+.env
+
 # Raw data and historical backups (local only)
 0.Data Base/
 Tool Backup/

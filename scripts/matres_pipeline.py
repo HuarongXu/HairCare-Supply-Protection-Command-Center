@@ -59,6 +59,7 @@ PIPELINE_STAGES = {
     "demand": "Demand (HC IDP)",
     "td": "TD Validation",
     "production": "Production Data",
+    "ibpi": "IBPI Safety Incremental (HPPP)",
 }
 UNKNOWN_ROLE = "Others"
 DETAIL_COLUMNS = [
@@ -4218,11 +4219,24 @@ def _run_stage_production(cfg: PipelineConfig) -> None:
     write_processed_csv(production_version_compare, cfg.processed_dir, PROCESSED_FILES["production_version_compare"])
 
 
+def _run_stage_ibpi(cfg: PipelineConfig) -> None:
+    """Fetch IBPI HPPP data from Databricks and write processed CSVs."""
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+    from ibpi_hppp import run as ibpi_run  # noqa: E402 – local import to avoid top-level Databricks deps
+
+    ibpi_run(output_path=cfg.processed_dir / "ibpi_hppp_weekly.csv")
+
+
 _STAGE_RUNNERS = {
     "supply": _run_stage_supply,
     "demand": _run_stage_demand,
     "td": _run_stage_td,
     "production": _run_stage_production,
+    "ibpi": _run_stage_ibpi,
 }
 
 

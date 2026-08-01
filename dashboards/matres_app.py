@@ -233,6 +233,10 @@ REFRESH_GROUPS: Dict[str, Dict[str, str]] = {
         "label": "Production Data",
         "description": "production_data + production_data_by_level",
     },
+    "ibpi": {
+        "label": "IBPI Safety Incremental (HPPP)",
+        "description": "ibpi_hppp from Databricks",
+    },
 }
 
 # Which data‐bundle keys belong to which refresh group
@@ -3995,6 +3999,51 @@ def build_role_trend(df: pd.DataFrame, role: str) -> go.Figure:
     return fig
 
 
+def build_ibpi_owner_summary_table(df: pd.DataFrame):
+    """Build (columns, data) for the IBPI HPPP Owner summary (months horizontal).
+
+    Source: ``data/processed/ibpi_hppp_owner_summary.csv`` produced by
+    ``scripts/ibpi_hppp.py``. Fixed columns: Owner, Level1, Level2; dynamic
+    month columns (e.g. 202608, 202609) appear as additional numeric columns.
+    """
+    fixed_cols = [
+        {"name": "Owner", "id": "Owner"},
+        {"name": "Level1", "id": "Level1"},
+        {"name": "Level2", "id": "Level2"},
+    ]
+    if df is None or df.empty:
+        return fixed_cols, []
+    work = df.copy()
+    for col in ("Owner", "Level1", "Level2"):
+        if col not in work.columns:
+            work[col] = ""
+        work[col] = work[col].fillna("").astype(str)
+
+    # Detect month columns (all columns that are not Owner/Level1/Level2)
+    month_cols = [c for c in work.columns if c not in ("Owner", "Level1", "Level2")]
+    # Clean up month column names (may arrive as "202608.0" floats from CSV)
+    rename_map = {}
+    clean_months = []
+    for c in month_cols:
+        try:
+            clean = str(int(float(c)))
+        except (ValueError, TypeError):
+            clean = str(c)
+        rename_map[c] = clean
+        clean_months.append(clean)
+    work = work.rename(columns=rename_map)
+
+    # Build column definitions
+    columns = list(fixed_cols)
+    for m in clean_months:
+        columns.append({"name": m, "id": m, "type": "numeric"})
+        work[m] = pd.to_numeric(work[m], errors="coerce").round(2)
+
+    all_ids = ["Owner", "Level1", "Level2"] + clean_months
+    records = work[all_ids].to_dict("records")
+    return columns, records
+
+
 def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     data_bundle = load_data_bundle(cfg)
     monthly_item = pd.DataFrame(data_bundle["monthly_item"])
@@ -4080,6 +4129,9 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
 
     td_validation_columns, td_validation_rows = build_td_validation_table_from_detail(td_validation_detail)
     td_validation_styles = build_td_validation_style_data_conditional(td_validation_columns)
+
+    ibpi_owner_summary_df = load_dataset(cfg.processed_dir, "ibpi_hppp_owner_summary.csv")
+    ibpi_owner_columns, ibpi_owner_data = build_ibpi_owner_summary_table(ibpi_owner_summary_df)
 
     overview_tab = dcc.Tab(
         label="Supply Protection",
@@ -4258,6 +4310,41 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
                         tooltip_delay=200,
                         tooltip_duration=None,
                         page_size=10,
+                        style_table={"overflowX": "auto"},
+                    ),
+                ],
+            ),
+            html.Div(
+                className="matrix-card",
+                style={"marginTop": "18px"},
+                children=[
+                    html.H3("IBPI Safety Incremental (HPPP) — Owner Summary (MSU)"),
+                    html.P(
+                        "Future-horizon IBPI HPPP rolled to monthly MSU, by Owner "
+                        "(BU / HKTW / DSTC/SaDC), Level1 and Level2. Months as columns.",
+                        style={"color": "#5a6b8c", "marginTop": "0"},
+                    ),
+                    DataTable(
+                        id="ibpi-owner-summary-table",
+                        columns=ibpi_owner_columns,
+                        data=ibpi_owner_data,
+                        style_header=PDE_STYLE_HEADER,
+                        style_cell=PDE_STYLE_CELL,
+                        style_data_conditional=[
+                            *PDE_STYLE_DATA_CONDITIONAL,
+                            {
+                                "if": {"filter_query": '{Owner} contains "Total"'},
+                                "fontWeight": "700",
+                                "backgroundColor": "#eaf2ff",
+                            },
+                        ],
+                        style_cell_conditional=[
+                            {"if": {"column_id": "Owner"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level1"}, "textAlign": "left"},
+                            {"if": {"column_id": "Level2"}, "textAlign": "left"},
+                        ],
+                        sort_action="none",
+                        page_size=20,
                         style_table={"overflowX": "auto"},
                     ),
                 ],
