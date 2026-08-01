@@ -13,6 +13,16 @@ pushd "%PROJECT_ROOT%"
 
 echo [INFO] Project Root: %PROJECT_ROOT%
 
+REM ========== 0.5) 杀掉旧的 Dashboard 进程 ==========
+echo [INFO] Stopping old dashboard (if any) ...
+taskkill /f /fi "WINDOWTITLE eq MatRes Dashboard Server" >nul 2>nul
+REM Also kill any python using port 8050
+for /f "tokens=5" %%P in ('netstat -aon ^| findstr ":8050 " ^| findstr "LISTENING"') do (
+  taskkill /f /pid %%P >nul 2>nul
+)
+timeout /t 2 /nobreak >nul
+echo [OK] Port 8050 cleared.
+
 REM ========== 1) 检查 Git ==========
 where git >nul 2>nul
 if errorlevel 1 (
@@ -161,9 +171,7 @@ REM ========== 6) 重跑数据 ==========
 echo [INFO] Running pipeline...
 python .\scripts\matres_pipeline.py
 if errorlevel 1 (
-  echo [ERROR] pipeline 失败，请检查日志。
-  pause
-  exit /b 1
+  echo [WARN] Pipeline had errors, continuing to start dashboard anyway...
 )
 
 REM ========== 7) 获取运行信息 ==========
