@@ -4342,6 +4342,18 @@ def run_pipeline_staged(
     })
     logging.info("Pipeline completed: %d/%d stages", total, total)
 
+    # Update the dashboard "Data updated" marker so a standalone pipeline run
+    # (e.g. from update_and_start_matres*.bat) reflects the fresh data time once
+    # the dashboard process (re)starts. The dashboard reads this same file.
+    try:
+        version_file = cfg.processed_dir / ".data_version"
+        version_file.parent.mkdir(parents=True, exist_ok=True)
+        version_file.write_text(datetime.now().isoformat(), encoding="utf-8")
+        logging.info("Wrote data version marker: %s", version_file)
+    except OSError as exc:
+        logging.warning("Could not write data version marker: %s", exc)
+
+
 
 def run_pipeline(cfg: PipelineConfig) -> None:
     """Legacy entry-point – delegates to ``run_pipeline_staged`` with all stages."""
