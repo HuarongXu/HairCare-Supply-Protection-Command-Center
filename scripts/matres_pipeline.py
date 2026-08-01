@@ -4220,15 +4220,27 @@ def _run_stage_production(cfg: PipelineConfig) -> None:
 
 
 def _run_stage_ibpi(cfg: PipelineConfig) -> None:
-    """Fetch IBPI HPPP data from Databricks and write processed CSVs."""
+    """Fetch IBPI HPPP data from Databricks and write processed CSVs.
+
+    This stage is best-effort: if Databricks is unreachable (timeout, missing
+    credentials, import error), it logs a warning and returns gracefully so
+    the rest of the pipeline is not blocked.
+    """
     try:
         from dotenv import load_dotenv
         load_dotenv()
     except ImportError:
         pass
-    from ibpi_hppp import run as ibpi_run  # noqa: E402 – local import to avoid top-level Databricks deps
+    try:
+        from ibpi_hppp import run as ibpi_run
+    except ImportError as e:
+        logging.warning("IBPI stage skipped (missing dependency): %s", e)
+        return
 
-    ibpi_run(output_path=cfg.processed_dir / "ibpi_hppp_weekly.csv")
+    try:
+        ibpi_run(output_path=cfg.processed_dir / "ibpi_hppp_weekly.csv")
+    except Exception as e:
+        logging.warning("IBPI stage failed (non-fatal): %s", e)
 
 
 _STAGE_RUNNERS = {
