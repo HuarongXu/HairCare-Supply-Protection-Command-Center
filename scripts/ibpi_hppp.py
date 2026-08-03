@@ -75,7 +75,7 @@ DEFAULT_BATCH_SIZE = 5            # max keyfiguredate values per query batch
 DEFAULT_SU_BATCH_SIZE = 200       # max FG codes per UOM-factor query batch
 DEFAULT_CATEGORY = "Hair Care"
 DEFAULT_CONNECT_TIMEOUT = 30      # seconds (socket)
-DEFAULT_QUERY_TIMEOUT = 120       # seconds (overall, per run)
+DEFAULT_QUERY_TIMEOUT = 300       # seconds (overall, per run) — generous for slow corp networks
 PUBLISH_INDICATORS = (1, 2)
 SU_ALTER_UOM = "SU"
 
