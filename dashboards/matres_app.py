@@ -1200,7 +1200,6 @@ def build_first_level_summary(
     source_level_column: str = "First Level",
     display_level_column: str = "Level 1",
     include_levels: List[str] | None = None,
-    hppp_series: pd.Series | None = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     unmapped_labels = {"未映射", "unmapped"}
     display_zero_threshold = 0.5
@@ -1311,26 +1310,6 @@ def build_first_level_summary(
             record[month] = fmt(row.get(month, 0))
         record[TOTAL_LABEL] = fmt(row.get(TOTAL_LABEL, 0))
         records.append(record)
-
-    # HPPP supply-protection increment (excl. HKTW) is shown as its own row and
-    # rolled into the Total, but never merged into the Base/PP rows above.
-    if hppp_series is not None and not hppp_series.empty:
-        hppp_by_month: Dict[str, float] = {}
-        hppp_row_total = 0.0
-        for month in months_display:
-            val = pd.to_numeric(hppp_series.get(month, 0), errors="coerce")
-            val = float(val) if pd.notna(val) else 0.0
-            hppp_by_month[month] = val
-            hppp_row_total += val
-        if hppp_row_total != 0:
-            hppp_record = {display_level_column: "HPPP"}
-            for month in months_display:
-                hppp_record[month] = fmt(hppp_by_month.get(month, 0))
-            hppp_record[TOTAL_LABEL] = fmt(hppp_row_total)
-            records.append(hppp_record)
-            for month in months_display:
-                totals_by_month[month] = totals_by_month.get(month, 0) + hppp_by_month.get(month, 0)
-            total_value += hppp_row_total
 
     total_record = {display_level_column: TOTAL_LABEL}
     if pd.notna(total_value) and float(total_value) > 0:
@@ -2555,10 +2534,72 @@ def compute_hppp_monthly_series(hppp_monthly_df: pd.DataFrame) -> pd.Series:
     return work.groupby("_month_norm")["MSU"].sum()
 
 
+def compute_hppp_level1_frame(hppp_monthly_df: pd.DataFrame) -> pd.DataFrame:
+    """Split HPPP supply-protection MSU by its seg Level1 into Base / PP rows.
+
+    Returns a frame shaped like ``monthly_msu_by_level1`` (columns
+    ``availability_month`` [YYYY-MM], ``First Level`` in {Base, PP}, ``total_msu``)
+    so it can be concatenated into the Level1 demand data. Rows whose ``Owner`` is
+    HKTW are excluded; only Level1 values Base/PP are kept so HPPP is folded into
+    the matching Base/PP supply-protection bucket on the Demand page.
+    """
+    cols = ["availability_month", "First Level", "total_msu"]
+    if hppp_monthly_df is None or hppp_monthly_df.empty:
+        return pd.DataFrame(columns=cols)
+    if not {"month", "MSU", "Level1"}.issubset(hppp_monthly_df.columns):
+        return pd.DataFrame(columns=cols)
+
+    work = hppp_monthly_df.copy()
+    if "Owner" in work.columns:
+        owner = work["Owner"].astype(str).str.strip().str.upper()
+        work = work[owner != "HKTW"].copy()
+    work["MSU"] = pd.to_numeric(work["MSU"], errors="coerce").fillna(0.0)
+
+    level_map = {"base": "Base", "pp": "PP"}
+    level_key = work["Level1"].astype(str).str.strip().str.lower()
+    work = work[level_key.isin(level_map.keys())].copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    work["First Level"] = work["Level1"].astype(str).str.strip().str.lower().map(level_map)
+
+    def normalize_month(value: Any) -> Optional[str]:
+        raw = str(value).strip()
+        match = re.fullmatch(r"(\d{4})-?(\d{2})", raw)
+        if match:
+            return f"{match.group(1)}-{match.group(2)}"
+        try:
+            digits = str(int(float(raw)))
+        except (ValueError, TypeError):
+            return None
+        if len(digits) == 6:
+            return f"{digits[:4]}-{digits[4:]}"
+        return None
+
+    work["availability_month"] = work["month"].apply(normalize_month)
+    work = work[work["availability_month"].notna()]
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+    grouped = (
+        work.groupby(["availability_month", "First Level"], as_index=False)["MSU"]
+        .sum()
+        .rename(columns={"MSU": "total_msu"})
+    )
+    return grouped[cols]
+
+
+def _with_hppp_level1(monthly_level1_df: pd.DataFrame, hppp_monthly_df: pd.DataFrame) -> pd.DataFrame:
+    """Concat HPPP Base/PP rows (Level1-split, HKTW-excluded) into Level1 data."""
+    frame = compute_hppp_level1_frame(hppp_monthly_df)
+    if frame.empty:
+        return monthly_level1_df
+    if monthly_level1_df is None or monthly_level1_df.empty:
+        return frame
+    return pd.concat([monthly_level1_df, frame], ignore_index=True)
+
+
 def build_demand_hs_dataframe(
     hc_idp_df: pd.DataFrame,
     monthly_level1_df: pd.DataFrame,
-    hppp_series: pd.Series | None = None,
 ) -> pd.DataFrame:
     if hc_idp_df.empty:
         return pd.DataFrame(columns=["Prod Line AS", "Overall Result"])
@@ -2611,21 +2652,11 @@ def build_demand_hs_dataframe(
 
     hs_base = base_lbe.add(supply_base, fill_value=0)
     hs_promo = promo_lbe.add(supply_promo, fill_value=0)
-
-    supply_hppp = pd.Series(0.0, index=month_cols)
-    if hppp_series is not None and not hppp_series.empty:
-        supply_hppp = (
-            pd.to_numeric(hppp_series, errors="coerce")
-            .reindex(month_cols, fill_value=0)
-            .fillna(0)
-        )
-    hs_hppp = supply_hppp
-    hs_total = hs_base.add(hs_promo, fill_value=0).add(hs_hppp, fill_value=0)
+    hs_total = hs_base.add(hs_promo, fill_value=0)
 
     rows = [
         {"Prod Line AS": "Base", **{m: hs_base.get(m, 0) for m in month_cols}},
         {"Prod Line AS": "Promotion", **{m: hs_promo.get(m, 0) for m in month_cols}},
-        {"Prod Line AS": "HPPP", **{m: hs_hppp.get(m, 0) for m in month_cols}},
         {"Prod Line AS": "Total", **{m: hs_total.get(m, 0) for m in month_cols}},
     ]
     hs_df = pd.DataFrame(rows)
@@ -2889,6 +2920,7 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
 
     hppp_monthly_df = load_dataset(cfg.processed_dir, "ibpi_hppp_monthly.csv")
     hppp_series = compute_hppp_monthly_series(hppp_monthly_df)
+    monthly_level1_dem = _with_hppp_level1(monthly_level1, hppp_monthly_df)
 
     page_sheets: Dict[str, List[Tuple[str, pd.DataFrame]]] = {
         "Demand Assumption": [],
@@ -2916,7 +2948,7 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
     page_sheets["Demand Assumption"].append(("01 Demand System LBE", _snapshot_to_dataframe(hc_idp_columns, hc_idp_rows)))
 
-    hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1, hppp_series)
+    hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1_dem)
     hc_idp_hs_columns, hc_idp_hs_rows = build_hc_idp_monthly_table(hc_idp_hs_df)
     page_sheets["Demand Assumption"].append(("02 Demand System LBE + Supply System Protection", _snapshot_to_dataframe(hc_idp_hs_columns, hc_idp_hs_rows)))
 
@@ -2932,11 +2964,10 @@ def create_dashboard_snapshot(cfg: AppConfig) -> Tuple[Path, Path, int]:
     page_sheets["Demand Assumption"].append(("06 Demand SysLBE+SSP Quarter", _snapshot_to_dataframe(q2_columns, q2_rows)))
 
     level1_core_columns, level1_core_rows = build_first_level_summary(
-        monthly_level1,
+        monthly_level1_dem,
         source_level_column="First Level",
         display_level_column="Level 1",
         include_levels=["Base", "PP"],
-        hppp_series=hppp_series,
     )
     page_sheets["Demand Assumption"].append(("07 Supply Protection PP+Base+HPPP", _snapshot_to_dataframe(level1_core_columns, level1_core_rows)))
 
@@ -4203,7 +4234,9 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     pde_alerts = pd.DataFrame(data_bundle["pde_alerts"])
     request_details = load_request_details(cfg)
     details_version = data_bundle.get("request_details_version")
-    hppp_series = compute_hppp_monthly_series(load_dataset(cfg.processed_dir, "ibpi_hppp_monthly.csv"))
+    hppp_monthly_df = load_dataset(cfg.processed_dir, "ibpi_hppp_monthly.csv")
+    hppp_series = compute_hppp_monthly_series(hppp_monthly_df)
+    monthly_level1_dem = _with_hppp_level1(monthly_level1, hppp_monthly_df)
     _dv_text, _dv_today = _format_data_version_display()
     metrics = compute_metrics(monthly_item, pde_alerts, request_details, hppp_series)
     role_options = build_role_options(monthly_requester)
@@ -4219,11 +4252,10 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
     drill_item_text_options = build_item_text_options(request_details, default_role)
 
     level1_core_columns, level1_core_rows = build_first_level_summary(
-        monthly_level1,
+        monthly_level1_dem,
         source_level_column="First Level",
         display_level_column="Level 1",
         include_levels=["Base", "PP"],
-        hppp_series=hppp_series,
     )
     level1_hktw_ess_columns, level1_hktw_ess_rows = build_first_level_summary(
         monthly_level1,
@@ -4232,7 +4264,7 @@ def build_layout(app: Dash, cfg: AppConfig) -> html.Div:
         include_levels=["HKTW", "ESS"],
     )
     hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
-    hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1, hppp_series)
+    hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1_dem)
     hc_idp_hs_columns, hc_idp_hs_rows = build_hc_idp_monthly_table(hc_idp_hs_df)
     hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
     hc_idp_hs_iya_columns, hc_idp_hs_iya_rows = build_demand_iya_table(hc_idp_hs_df, historical_shipment)
@@ -5917,7 +5949,9 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
         historical_shipment = pd.DataFrame(data.get("historical_shipment", []))
         pde_alerts = pd.DataFrame(data.get("pde_alerts", []))
         request_details = load_request_details(cfg)
-        hppp_series = compute_hppp_monthly_series(load_dataset(cfg.processed_dir, "ibpi_hppp_monthly.csv"))
+        hppp_monthly_df = load_dataset(cfg.processed_dir, "ibpi_hppp_monthly.csv")
+        hppp_series = compute_hppp_monthly_series(hppp_monthly_df)
+        monthly_level1_dem = _with_hppp_level1(monthly_level1, hppp_monthly_df)
         selected_role = role_value or ROLE_ALL_VALUE
         table_columns, table_data = build_monthly_matrix(monthly_requester, selected_role, hppp_series)
 
@@ -5988,7 +6022,7 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
                 drill_total_rows = []
 
         hc_idp_columns, hc_idp_rows = build_hc_idp_monthly_table(hc_idp_monthly)
-        hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1, hppp_series)
+        hc_idp_hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1_dem)
         hc_idp_iya_columns, hc_idp_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
         hc_idp_hs_columns, hc_idp_hs_rows = build_hc_idp_monthly_table(hc_idp_hs_df)
         hc_idp_hs_iya_columns, hc_idp_hs_iya_rows = build_demand_iya_table(hc_idp_hs_df, historical_shipment)
@@ -6036,11 +6070,10 @@ def register_callbacks(app: Dash, cfg: AppConfig) -> None:
             segment_totals_after=production_group_1_totals_after,
         )
         level1_core_columns, level1_core_rows = build_first_level_summary(
-            monthly_level1,
+            monthly_level1_dem,
             source_level_column="First Level",
             display_level_column="Level 1",
             include_levels=["Base", "PP"],
-            hppp_series=hppp_series,
         )
         level1_hktw_ess_columns, level1_hktw_ess_rows = build_first_level_summary(
             monthly_level1,
