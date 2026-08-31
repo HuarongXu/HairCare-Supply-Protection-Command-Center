@@ -10,11 +10,17 @@ The generated HTML matches the structure of the real weekly update emails:
 """
 from pathlib import Path
 from datetime import datetime
+import logging
 import re
 import sys
 import time
 import base64
 import pandas as pd
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -23,19 +29,30 @@ if str(ROOT) not in sys.path:
 from dashboards.matres_app import (
     AppConfig,
     CONFIG_PATH,
+    _with_hppp_level1,
+    compute_hppp_monthly_series,
     load_data_bundle,
+    load_dataset,
     load_request_details,
     build_demand_hs_dataframe,
     build_demand_iya_table,
     build_demand_iya_by_quarter_table,
+)
+from scripts.weekly_mail_summary import (
+    calculate_supply_inventory,
+    format_supply_inventory,
+    safe_dashboard_url,
 )
 
 # ---------------------------------------------------------------------------
 # Dashboard URL (used in the email body link)
 # ---------------------------------------------------------------------------
 import os as _os
-DASHBOARD_URL = _os.getenv("MATRES_DASHBOARD_URL", "http://127.0.0.1:8050/")
 LOCAL_DASHBOARD_URL = "http://127.0.0.1:8050/"
+DASHBOARD_URL = safe_dashboard_url(
+    _os.getenv("MATRES_DASHBOARD_URL", LOCAL_DASHBOARD_URL),
+    LOCAL_DASHBOARD_URL,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -98,7 +115,7 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.common.by import By
     except ImportError:
-        print('selenium not installed, skipping screenshots')
+        logging.warning('Selenium unavailable; skipping screenshots.')
         return result
 
     opts = Options()
@@ -124,7 +141,7 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
         demand_path = out_dir / 'demand_assumption.png'
         driver.save_screenshot(str(demand_path))
         result['demand_assumption'] = demand_path
-        print(f'screenshot: {demand_path.name}')
+        logging.info('Captured screenshot: %s', demand_path.name)
 
         # 2. Supply Protection tab
         tabs = driver.find_elements(By.CSS_SELECTOR, '.page-tab')
@@ -144,7 +161,7 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
         supply_path = out_dir / 'supply_protection.png'
         driver.save_screenshot(str(supply_path))
         result['supply_protection'] = supply_path
-        print(f'screenshot: {supply_path.name}')
+        logging.info('Captured screenshot: %s', supply_path.name)
 
         # 3. PDE Alert screenshot — element-level capture of .pde-panel only
         driver.execute_script("""
@@ -157,10 +174,10 @@ def capture_dashboard_screenshots(out_dir: Path) -> dict:
             pde_path = out_dir / 'pde_alert.png'
             pde_el[0].screenshot(str(pde_path))
             result['pde_alert'] = pde_path
-            print(f'screenshot: {pde_path.name}')
+            logging.info('Captured screenshot: %s', pde_path.name)
 
     except Exception as e:
-        print(f'screenshot capture failed: {e}')
+        logging.warning('Screenshot capture failed (%s).', type(e).__name__)
     finally:
         if driver:
             try:
@@ -195,7 +212,7 @@ def autocrop_screenshot(img_path: Path, padding: int = 8) -> None:
         lower = min(img.height, bbox[3] + padding)
         cropped = img.crop((left, upper, right, lower))
         cropped.save(img_path)
-        print(f'cropped {img_path.name}: {img.size} -> {cropped.size}')
+        logging.info('Cropped %s: %s -> %s', img_path.name, img.size, cropped.size)
 
 
 def image_to_base64(img_path: Path) -> str:
@@ -225,6 +242,11 @@ hc_idp_monthly = pd.DataFrame(bundle.get('hc_idp_monthly', []))
 monthly_level1 = pd.DataFrame(bundle.get('monthly_level1', []))
 historical_shipment = pd.DataFrame(bundle.get('historical_shipment', []))
 monthly_item = pd.DataFrame(bundle.get('monthly_item', []))
+hppp_monthly = load_dataset(cfg.processed_dir, 'ibpi_hppp_monthly.csv')
+if hppp_monthly is None or hppp_monthly.empty:
+    logging.warning('HPPP monthly data is missing or empty; email HPPP contribution is zero.')
+hppp_series = compute_hppp_monthly_series(hppp_monthly)
+monthly_level1_with_hppp = _with_hppp_level1(monthly_level1, hppp_monthly)
 
 # ── Demand monthly ────────────────────────────────────────────────────────
 month_cols = sorted([
@@ -241,7 +263,7 @@ _, lbe_iya_rows = build_demand_iya_table(hc_idp_monthly, historical_shipment)
 lbe_iya_month = get_total_iya_value(lbe_iya_rows, current_month)
 
 # ── HS monthly ────────────────────────────────────────────────────────────
-hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1)
+hs_df = build_demand_hs_dataframe(hc_idp_monthly, monthly_level1_with_hppp)
 hs_total_row = get_total_row(hs_df)
 hs_month = to_num(hs_total_row.iloc[0].get(current_month, 0)) if not hs_total_row.empty and current_month else 0.0
 
@@ -273,19 +295,11 @@ next_q_lbe_iya = to_num(q_total.get(f'{next_quarter_tag} LBE IYA', 0)) if next_q
 next_q_hs_iya = to_num(q_total.get(f'{next_quarter_tag} DSL+SSP IYA', 0)) if next_quarter_tag else 0.0
 
 # ── Supply protection inventory (all months total) ────────────────────────
-if not monthly_item.empty:
-    monthly_item['total_msu'] = pd.to_numeric(monthly_item.get('total_msu', 0), errors='coerce').fillna(0.0)
-    item_sum = monthly_item.groupby('Item Text', dropna=False)['total_msu'].sum(min_count=1).to_dict()
-else:
-    item_sum = {}
-
-fg = (
-    to_num(item_sum.get('FG Rolling', 0))
-    + to_num(item_sum.get('R Quotation', 0))
-    + to_num(item_sum.get('R Component', 0))
-)
-material = to_num(item_sum.get('R Material', 0)) + to_num(item_sum.get('RM Material', 0))
-supply_total = fg + material
+inventory = calculate_supply_inventory(monthly_item, hppp_series)
+fg = inventory['fg']
+material = inventory['material']
+hppp = inventory['hppp']
+supply_total = inventory['total']
 
 # ===========================================================================
 # Capture dashboard screenshots
@@ -359,7 +373,7 @@ if next_quarter_tag:
     )
 
 # Supply inventory line
-supply_inventory_line = f"Total: {fmt_msu(supply_total)} msu; FG: {fmt_msu(fg)} msu; Material: {fmt_msu(material)} msu."
+supply_inventory_line = format_supply_inventory(inventory)
 
 # Screenshot or placeholder text
 demand_screenshot_html = demand_img_tag if demand_img_tag else '<p style="font-size:13px;color:#9ca3af;margin:0;"><i>(Paste dashboard screenshot here)</i></p>'
@@ -414,6 +428,7 @@ html = f"""<!doctype html>
           <li style="margin:2px 0;font-size:14px;">{supply_month_line}</li>
 {('          <li style="margin:2px 0;font-size:14px;">' + supply_quarter_line + '</li>') if supply_quarter_line else ''}
 {('          <li style="margin:2px 0;font-size:14px;">' + supply_next_quarter_line + '</li>') if supply_next_quarter_line else ''}
+                    <li style="margin:2px 0;font-size:14px;">{supply_inventory_line}</li>
         </ul>
       </li>
     </ul>
@@ -500,14 +515,20 @@ html = f"""<!doctype html>
 out_file = out_dir / f'Supply_Protection_Update_{run_date}.html'
 out_file.write_text(html, encoding='utf-8')
 
-print(f'generated={out_file}')
-print(f'month={current_month}, quarter={quarter_tag}, next_quarter={next_quarter_tag}')
-print(f'lbe_month={lbe_month:.3f}, lbe_iya_month={lbe_iya_month:.3f}')
-print(f'hs_month={hs_month:.3f}, hs_iya_month={hs_iya_month:.3f}')
-print(f'supply_total_all_months={supply_total:.3f}, fg={fg:.3f}, material={material:.3f}')
+logging.info('Generated weekly email preview: %s', out_file.name)
+logging.info('Summary periods: month=%s, quarter=%s, next_quarter=%s', current_month, quarter_tag, next_quarter_tag)
+logging.info('Demand summary: lbe_month=%.3f, lbe_iya_month=%.3f', lbe_month, lbe_iya_month)
+logging.info('Protection summary: hs_month=%.3f, hs_iya_month=%.3f', hs_month, hs_iya_month)
+logging.info(
+    'Supply summary: total=%.3f, fg=%.3f, material=%.3f, hppp=%.3f',
+    supply_total,
+    fg,
+    material,
+    hppp,
+)
 if screenshots.get('demand_assumption'):
-    print(f'screenshot_demand={screenshots["demand_assumption"]}')
+    logging.info('Demand screenshot: %s', screenshots['demand_assumption'].name)
 if screenshots.get('supply_protection'):
-    print(f'screenshot_supply={screenshots["supply_protection"]}')
+    logging.info('Supply screenshot: %s', screenshots['supply_protection'].name)
 if screenshots.get('pde_alert'):
-    print(f'screenshot_pde={screenshots["pde_alert"]}')
+    logging.info('PDE screenshot: %s', screenshots['pde_alert'].name)
