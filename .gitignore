@@ -35,6 +35,7 @@ dashboards/matres_app copy.py
 !dashboards/matres_app V40*.py
 
 # Local-only artefacts
+.worktrees/
 diff_output.txt
 *.exe
 *.zip
