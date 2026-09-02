@@ -4,7 +4,7 @@ chcp 65001 >nul
 title MatRes One-Click Update + Start
 
 REM ========== Machine-specific config (4CV823WZKZ-W10) ==========
-set "MATRES_DASHBOARD_URL=http://143.35.13.175:8050/"
+set "MATRES_DASHBOARD_URL=http://4CV823WZKZ-W10:8050/"
 set "MATRES_ADMIN_PASSWORD=HR"
 
 REM ========== 0) 项目目录 ==========
